@@ -473,3 +473,146 @@ def test_pc_control_badge_visible_when_web_tools_disabled(monkeypatch, tmp_path)
         assert "list_drives" in controller._bot.config.system_prompt
     finally:
         _cleanup_controller(app, controller)
+
+
+def test_settings_dialog_uses_tabs_without_scrollarea_or_clipping():
+    app = _get_qapp()
+    cfg = dc.CharacterConfig(
+        character_name="Lumi",
+        provider="groq",
+        enable_system_tools=True,
+        allow_all_user_folders=True,
+    )
+    dlg = dc.SettingsDialog(cfg)
+    try:
+        assert dlg.findChildren(QtWidgets.QScrollArea) == []
+        assert dlg._tabs.count() == 4
+        tab_labels = [dlg._tabs.tabText(i).replace("&&", "&") for i in range(dlg._tabs.count())]
+        assert tab_labels == ["Character", "AI & API Keys", "PC & Files", "APIs & Tools"]
+        dlg.show()
+        for idx in range(dlg._tabs.count()):
+            dlg._tabs.setCurrentIndex(idx)
+            app.processEvents()
+            page = dlg._tabs.widget(idx)
+            assert page.minimumSizeHint().width() <= dlg._tabs.width()
+        assert dlg.minimumSizeHint().width() <= dlg.width()
+    finally:
+        dlg.close()
+        dlg.deleteLater()
+        QtWidgets.QApplication.sendPostedEvents(None, QtCore.QEvent.Type.DeferredDelete)
+        QtWidgets.QApplication.processEvents()
+
+
+def test_builtin_apis_dialog_smoke_and_save_env(tmp_path, monkeypatch):
+    app = _get_qapp()
+    monkeypatch.setenv("OPENWEATHER_API_KEY", "test-owm-key")
+    dlg = dc.BuiltInApisDialog()
+    env_file = tmp_path / ".env"
+    try:
+        assert dlg.findChildren(QtWidgets.QScrollArea) == []
+        dlg.show()
+        app.processEvents()
+        assert dlg.minimumSizeHint().width() <= dlg.width()
+        edits = dlg.findChildren(QtWidgets.QLineEdit)
+        assert edits, "BuiltInApisDialog should contain input fields"
+        edits[0].setText("edited-test-secret-123")
+        dlg.save_to_env(env_path=env_file)
+        assert env_file.exists()
+        assert "edited-test-secret-123" in env_file.read_text(encoding="utf-8")
+    finally:
+        dlg.close()
+        dlg.deleteLater()
+        QtWidgets.QApplication.sendPostedEvents(None, QtCore.QEvent.Type.DeferredDelete)
+        QtWidgets.QApplication.processEvents()
+
+
+def test_custom_api_editor_dialog_preset_templates_and_build(tmp_path):
+    import api_tools
+
+    app = _get_qapp()
+    dlg = dc.CustomApiEditorDialog()
+    try:
+        assert dlg.findChildren(QtWidgets.QScrollArea) == []
+        dlg.show()
+        app.processEvents()
+        assert dlg.minimumSizeHint().width() <= dlg.width()
+        assert dlg._template_combo.count() >= len(api_tools.PRESET_TEMPLATES) + 1
+        dlg._template_combo.setCurrentIndex(1)
+        app.processEvents()
+        ep = dlg.build_endpoint()
+        assert isinstance(ep, api_tools.CustomApiEndpoint)
+        assert ep.base_url.startswith("http")
+        assert ep.name.strip() != ""
+        env_file = tmp_path / ".env"
+        dlg.save_secret_if_entered(env_path=env_file)
+    finally:
+        dlg.close()
+        dlg.deleteLater()
+        QtWidgets.QApplication.sendPostedEvents(None, QtCore.QEvent.Type.DeferredDelete)
+        QtWidgets.QApplication.processEvents()
+
+
+def test_chat_area_hides_scrollbars_and_shows_tools_off_banner(monkeypatch, tmp_path):
+    app = _get_qapp()
+    monkeypatch.setattr(dc, "CONFIG_FILE", tmp_path / "character_config.json")
+    monkeypatch.setattr(dc.CharacterConfig, "save", lambda self, path=None: None)
+
+    cfg = dc.CharacterConfig(
+        character_name="Lumi",
+        provider="mock",
+        use_tools=False,
+        enable_system_tools=True,
+        allowed_folders=[str(tmp_path)],
+        hotkey_enabled=False,
+    )
+    controller = dc.DesktopCompanionApp(app, cfg)
+    try:
+        popup = controller.popup
+        popup.show()
+        app.processEvents()
+        assert popup._scroll.verticalScrollBarPolicy() == QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        assert popup._scroll.horizontalScrollBarPolicy() == QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        assert popup._input.verticalScrollBarPolicy() == QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        assert popup._input.horizontalScrollBarPolicy() == QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+
+        # Tools-OFF banner and status badge appear when use_tools=False
+        assert popup._tools_off_banner.isHidden() is False
+        assert "Web/API OFF" in popup._status_lbl.text()
+
+        # Fill chat beyond viewport height; scrollbars remain hidden while scrolling still works
+        for i in range(12):
+            popup.add_user_message(f"Message {i}: testing overflow height cleanly")
+            popup.start_assistant_message()
+            popup.finish_assistant_message(f"Reply {i}: testing response wrapping without scrollbars.")
+        app.processEvents()
+        popup._msg_layout.activate()
+        app.processEvents()
+        popup._do_scroll_to_bottom()
+        bar = popup._scroll.verticalScrollBar()
+        assert bar.isVisible() is False
+        assert popup._scroll.horizontalScrollBar().isVisible() is False
+        assert bar.maximum() > 0
+        assert bar.value() == bar.maximum()
+
+        # Toggling web tools ON hides banner and removes Web/API OFF badge
+        controller.toggle_web_tools(True)
+        assert controller._config.use_tools is True
+        assert controller._bot.config.use_tools is True
+        assert popup._tools_off_banner.isHidden() is True
+        assert "Web/API OFF" not in popup._status_lbl.text()
+
+        # SettingsDialog keeps Tab 1 & Tab 3 web tools checkboxes synced
+        dlg = dc.SettingsDialog(controller._config)
+        try:
+            assert dlg._tools_chk.isChecked() is True
+            assert dlg._apis_tools_chk.isChecked() is True
+            dlg._apis_tools_chk.setChecked(False)
+            assert dlg._tools_chk.isChecked() is False
+            assert dlg.updated_config().use_tools is False
+        finally:
+            dlg.close()
+            dlg.deleteLater()
+            QtWidgets.QApplication.sendPostedEvents(None, QtCore.QEvent.Type.DeferredDelete)
+            QtWidgets.QApplication.processEvents()
+    finally:
+        _cleanup_controller(app, controller)

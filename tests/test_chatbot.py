@@ -321,10 +321,10 @@ def test_ollama_no_key_and_tool_fallback(monkeypatch):
         call_count += 1
         body = json.loads(request.content.decode("utf-8"))
         seen_payloads.append((str(request.url), dict(request.headers), body))
-        if call_count == 1:
+        if "1234" in str(request.url) and call_count == 2:
             return httpx.Response(
                 400,
-                json={"error": {"message": "registry.ollama.ai/library/llama3:8b does not support tools"}},
+                json={"error": {"message": "model does not support tools"}},
             )
         sse = _make_sse_bytes([
             {"choices": [{"delta": {"content": "Hi from local Ollama!"}}]},
@@ -346,10 +346,23 @@ def test_ollama_no_key_and_tool_fallback(monkeypatch):
 
     answer = "".join(e["content"] for e in events if e["type"] == "token")
     assert answer == "Hi from local Ollama!"
-    assert len(seen_payloads) == 2
     assert seen_payloads[0][0] == "http://127.0.0.1:11434/v1/chat/completions"
-    assert "tools" in seen_payloads[0][2]
-    assert "tools" not in seen_payloads[1][2]
+    assert "tools" not in seen_payloads[0][2]
+
+    # OpenAI-compatible servers that reject `tools` with 400 still fall back cleanly
+    compat_bot = chatbot.Chatbot(
+        chatbot.ChatbotConfig(
+            provider="nvidia",
+            base_url="http://127.0.0.1:1234/v1",
+            api_key="nvapi-test",
+            model_name="local-llama",
+            use_tools=True,
+        )
+    )
+    events2 = list(compat_bot.stream_turn("hello compat"))
+    assert "".join(e["content"] for e in events2 if e["type"] == "token") == "Hi from local Ollama!"
+    assert "tools" in seen_payloads[1][2]
+    assert "tools" not in seen_payloads[2][2]
 
 
 def test_groq_provider_config_and_gemma_payload(monkeypatch):
@@ -502,3 +515,125 @@ def test_tavily_web_search_tool_and_status(monkeypatch):
     assert status_json["keys_configured"]["tavily"] is True
     assert "grok" in status_json["keys_configured"]
     assert "grok" in status_json["models"]
+
+
+def test_ollama_text_tool_fallback_executes_tools_and_filters_extra_kwargs(monkeypatch):
+    monkeypatch.setattr(
+        chatbot,
+        "get_india_gold_price",
+        lambda: "Gold (INR/gram): buy INR 14631, sell INR 14209",
+    )
+    monkeypatch.setitem(chatbot.TOOL_FUNCTIONS, "get_india_gold_price", chatbot.get_india_gold_price)
+
+    seen_payloads = []
+    call_count = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal call_count
+        call_count += 1
+        body = json.loads(request.content.decode("utf-8"))
+        seen_payloads.append(body)
+        if call_count == 1:
+            return httpx.Response(
+                400,
+                json={"error": {"message": "registry.ollama.ai/library/llama3:8b does not support tools"}},
+            )
+        if call_count == 2:
+            # Emulates model with brief preamble before ```tool_call and an extra unexpected kwarg
+            sse = _make_sse_bytes([
+                {"choices": [{"delta": {"content": "Checking... "}}]},
+                {"choices": [{"delta": {"content": '```tool_call\n{"name": "get_india_gold_price", "arguments": {"country": "India"}}'}}]},
+                "[DONE]",
+            ])
+            return httpx.Response(200, content=sse, headers={"content-type": "text/event-stream"})
+        if call_count == 3:
+            sse = _make_sse_bytes([
+                {"choices": [{"delta": {"content": "Today India gold buy rate is INR 14631/gram."}}]},
+                "[DONE]",
+            ])
+            return httpx.Response(200, content=sse, headers={"content-type": "text/event-stream"})
+        sse = _make_sse_bytes([
+            {"choices": [{"delta": {"content": "Second turn direct reply."}}]},
+            "[DONE]",
+        ])
+        return httpx.Response(200, content=sse, headers={"content-type": "text/event-stream"})
+
+    real_client = httpx.Client
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(
+        chatbot.httpx,
+        "Client",
+        lambda *args, **kwargs: real_client(transport=transport, **kwargs),
+    )
+
+    bot = chatbot.Chatbot(
+        chatbot.ChatbotConfig(
+            provider="nvidia",
+            base_url="http://127.0.0.1:1234/v1",
+            api_key="nvapi-test",
+            model_name="llama3:8b",
+            use_tools=True,
+        )
+    )
+    events = list(bot.stream_turn("What is today's gold rate in India?"))
+    done_ev = [e for e in events if e["type"] == "done"][-1]
+    tool_ends = [e for e in events if e["type"] == "tool_end"]
+
+    assert tool_ends and tool_ends[0]["name"] == "get_india_gold_price"
+    assert "14631" in tool_ends[0]["result"]
+    assert done_ev["content"] == "Today India gold buy rate is INR 14631/gram."
+    assert "tool_call" not in done_ev["content"]
+    assert "tools" in seen_payloads[0]
+    assert "tools" not in seen_payloads[1]
+    assert "Tool get_india_gold_price result" in seen_payloads[2]["messages"][-1]["content"]
+
+    # Second turn reuses cached text_tool_mode without triggering another 400
+    events2 = list(bot.stream_turn("Say hi"))
+    assert len(seen_payloads) == 4
+    assert "tools" not in seen_payloads[3]
+    assert "".join(e["content"] for e in events2 if e["type"] == "token") == "Second turn direct reply."
+
+
+def test_text_tool_call_parser_handles_python_style_and_adjacent_blocks():
+    allowed = {"get_weather", "get_india_gold_price"}
+
+    # Two-backtick Python dict style emitted by llama3:8b
+    c1 = chatbot._extract_text_tool_calls(
+        '``get_weather({"city": "Chennai", "units": "metric"})\n``',
+        allowed,
+    )
+    assert c1 is not None and len(c1) == 1
+    assert c1[0]["function"]["name"] == "get_weather"
+    assert json.loads(c1[0]["function"]["arguments"]) == {"city": "Chennai", "units": "metric"}
+
+    # Zero-arg call followed by {"arguments": {}} line
+    c2 = chatbot._extract_text_tool_calls(
+        '```get_india_gold_price()\n{"arguments": {}}\n```',
+        allowed,
+    )
+    assert c2 is not None and len(c2) == 1
+    assert c2[0]["function"]["name"] == "get_india_gold_price"
+    assert json.loads(c2[0]["function"]["arguments"]) == {}
+
+    # Prompt includes actual parameter names for web/API tools (not empty "none")
+    prompt = chatbot._build_text_tool_system_prompt(include_web=True, include_system=True)
+    assert "get_weather (params: location, days)" in prompt
+
+    # Positional argument call mapped via tool schema param names
+    c3 = chatbot._extract_text_tool_calls('get_weather("Chennai")', allowed)
+    assert c3 is not None and json.loads(c3[0]["function"]["arguments"]) == {"location": "Chennai"}
+
+    # Early stream stop triggers once closing fence completes a valid call (with or without preamble)
+    assert chatbot._should_stop_text_tool_stream(
+        '``get_weather({"city": "Chennai"})\n``',
+        allowed,
+    ) is True
+    preamble_fenced = 'Let me check that.\n\n```get_weather\n{"location": "Chennai"}\n```'
+    c4 = chatbot._extract_text_tool_calls(preamble_fenced, allowed)
+    assert c4 is not None and c4[0]["function"]["name"] == "get_weather"
+    assert json.loads(c4[0]["function"]["arguments"]) == {"location": "Chennai"}
+    assert chatbot._should_stop_text_tool_stream(preamble_fenced, allowed) is True
+    assert chatbot._should_stop_text_tool_stream(
+        '```tool_call\n{"name": "get_weather", "arguments": {"city": "Chennai"}}\n',
+        allowed,
+    ) is False

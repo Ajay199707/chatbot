@@ -1,6 +1,7 @@
 # Secrets & local user runtime configuration
 .env
 character_config.json
+custom_apis.json
 
 # PyInstaller / executable build artifacts
 build/

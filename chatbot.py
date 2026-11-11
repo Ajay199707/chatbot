@@ -23,9 +23,11 @@ Run:
 from __future__ import annotations
 
 import argparse
+import ast
 import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import inspect
 import json
 import os
 from pathlib import Path
@@ -44,6 +46,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 import uvicorn
 
+import api_tools
 import system_tools
 
 try:
@@ -283,40 +286,8 @@ def get_india_gold_price() -> str:
 
 
 def get_news(keyword: str) -> str:
-    """Fetch latest news headlines via Google News RSS."""
-    cleaned = (keyword or "").strip()
-    if not cleaned:
-        return json.dumps({"error": "Missing 'keyword' argument"})
-
-    q = urllib.parse.quote(cleaned)
-    url = f"https://news.google.com/rss/search?q={q}&hl=en-IN&gl=IN&ceid=IN:en"
-    try:
-        with httpx.Client(timeout=15.0, follow_redirects=True) as client:
-            resp = client.get(url, headers={"User-Agent": "chatbot/2.0"})
-            resp.raise_for_status()
-            xml_bytes = resp.content
-
-        root = ET.fromstring(xml_bytes)
-        items = root.findall(".//item")[:5]
-        if not items:
-            return json.dumps({"error": f"No news found for '{cleaned}'"})
-        out = []
-        for item in items:
-            title = item.findtext("title", default="(no title)")
-            pub = item.findtext("pubDate", default="")
-            source = item.findtext("source", default="")
-            link = item.findtext("link", default="")
-            entry = f"- {title}"
-            if source:
-                entry += f" [{source}]"
-            if pub:
-                entry += f" ({pub})"
-            if link:
-                entry += f"\n  Link: {link}"
-            out.append(entry)
-        return "\n".join(out)
-    except Exception as exc:
-        return json.dumps({"error": f"Failed to fetch news: {exc}"})
+    """Fetch latest news headlines via NewsAPI (if key set) or free Google News RSS."""
+    return api_tools.get_news(keyword)
 
 
 def get_current_datetime() -> str:
@@ -335,63 +306,13 @@ def web_search(
     search_depth: str = "basic",
     max_results: int = 5,
 ) -> str:
-    """Search the live web using the Tavily Search REST API."""
-    clean_query = (query or "").strip()
-    if not clean_query:
-        return "Error: Search query must not be empty."
-
-    api_key = os.getenv("TAVILY_API_KEY", "").strip()
-    if not api_key:
-        return (
-            "Error: TAVILY_API_KEY is not configured. Add TAVILY_API_KEY in Settings or .env "
-            "(https://app.tavily.com) to enable live web search."
-        )
-
-    clean_topic = topic if topic in ("general", "news", "finance") else "general"
-    clean_depth = search_depth if search_depth in ("basic", "advanced") else "basic"
-    try:
-        clamped_max = max(1, min(10, int(max_results)))
-    except (TypeError, ValueError):
-        clamped_max = 5
-
-    payload = {
-        "query": clean_query,
-        "topic": clean_topic,
-        "search_depth": clean_depth,
-        "max_results": clamped_max,
-        "include_answer": True,
-    }
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-
-    try:
-        with httpx.Client(timeout=15.0) as client:
-            resp = client.post("https://api.tavily.com/search", headers=headers, json=payload)
-            if resp.status_code != 200:
-                return f"Error performing Tavily search (HTTP {resp.status_code}): {resp.text[:300]}"
-            data = resp.json()
-    except Exception as exc:
-        return f"Error performing Tavily search: {exc}"
-
-    lines: List[str] = []
-    answer = (data.get("answer") or "").strip()
-    if answer:
-        lines.append(f"Summary: {answer}")
-
-    results = data.get("results") or []
-    if results:
-        lines.append("Sources:")
-        for idx, item in enumerate(results[:clamped_max], 1):
-            title = (item.get("title") or "Untitled").strip()
-            url_str = (item.get("url") or "").strip()
-            snippet = " ".join((item.get("content") or "").split())[:320]
-            pub = (item.get("published_date") or "").strip()
-            meta = f" ({pub})" if pub else ""
-            lines.append(f"{idx}. {title}{meta}\n   URL: {url_str}\n   {snippet}")
-
-    return "\n".join(lines) if lines else f"No Tavily search results found for '{clean_query}'."
+    """Search the live web using Tavily (primary) with automatic free DuckDuckGo fallback."""
+    return api_tools.web_search(
+        query=query,
+        topic=topic,
+        search_depth=search_depth,
+        max_results=max_results,
+    )
 
 
 TOOL_SPECS: List[Dict[str, Any]] = [
@@ -424,8 +345,9 @@ TOOL_SPECS: List[Dict[str, Any]] = [
     {
         "name": "web_search",
         "description": (
-            "Search the live web using Tavily for up-to-date facts, documentation, current events, "
-            "prices, weather, sports, or any question needing current internet information."
+            "Search the live web (Tavily + free DuckDuckGo fallback) for up-to-date facts, "
+            "documentation, current events, prices, sports, or any general internet information. "
+            "Prefer get_weather for weather questions."
         ),
         "properties": {
             "query": {
@@ -461,15 +383,23 @@ TOOL_SPECS: List[Dict[str, Any]] = [
 TOOL_FUNCTIONS = {spec["name"]: spec["fn"] for spec in TOOL_SPECS}
 
 
+def _all_tool_specs(include_web: bool, include_system: bool) -> List[Dict[str, Any]]:
+    specs: List[Dict[str, Any]] = []
+    if include_web:
+        specs.extend(TOOL_SPECS)
+        specs.extend(api_tools.get_api_tool_specs())
+    if include_system:
+        specs.extend(system_tools.SYSTEM_TOOL_SPECS)
+    return specs
+
+
 def build_openai_tools(
     include_system: bool = False,
     *,
     include_web: bool = True,
 ) -> List[Dict[str, Any]]:
     """Build OpenAI/NVIDIA/Groq/Grok-compatible tool declarations."""
-    specs = (list(TOOL_SPECS) if include_web else []) + (
-        list(system_tools.SYSTEM_TOOL_SPECS) if include_system else []
-    )
+    specs = _all_tool_specs(include_web=include_web, include_system=include_system)
     return [
         {
             "type": "function",
@@ -493,9 +423,7 @@ def build_gemini_tools(
     include_web: bool = True,
 ) -> List[Dict[str, Any]]:
     """Build Gemini REST API functionDeclarations (omits parameters if none exist)."""
-    specs = (list(TOOL_SPECS) if include_web else []) + (
-        list(system_tools.SYSTEM_TOOL_SPECS) if include_system else []
-    )
+    specs = _all_tool_specs(include_web=include_web, include_system=include_system)
     declarations: List[Dict[str, Any]] = []
     for spec in specs:
         decl: Dict[str, Any] = {
@@ -505,10 +433,18 @@ def build_gemini_tools(
         if spec["properties"]:
             gemini_props: Dict[str, Any] = {}
             for k, v in spec["properties"].items():
-                prop_schema: Dict[str, Any] = {
-                    "type": v["type"].upper(),
-                    "description": v.get("description", ""),
-                }
+                raw_type = str(v.get("type", "string")).upper()
+                desc = v.get("description", "")
+                if raw_type == "OBJECT" and not v.get("properties"):
+                    prop_schema: Dict[str, Any] = {
+                        "type": "STRING",
+                        "description": f"{desc} (pass as JSON object string, e.g. '{{\"key\": \"value\"}}')".strip(),
+                    }
+                else:
+                    prop_schema = {
+                        "type": raw_type,
+                        "description": desc,
+                    }
                 if "enum" in v:
                     prop_schema["enum"] = list(v["enum"])
                 if "items" in v and isinstance(v["items"], dict):
@@ -529,12 +465,24 @@ TOOLS = build_openai_tools()
 GEMINI_TOOLS = build_gemini_tools()
 
 
+def _filter_callable_kwargs(fn: Any, args: Dict[str, Any]) -> Dict[str, Any]:
+    """Drop unexpected keys unless the callable accepts **kwargs."""
+    try:
+        sig = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return args
+    if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+        return args
+    return {k: v for k, v in args.items() if k in sig.parameters}
+
+
 def execute_tool(
     name: str,
     args: Any,
     system_policy: Optional[system_tools.SystemToolsPolicy] = None,
+    api_policy: Optional[api_tools.ApiToolsPolicy] = None,
 ) -> str:
-    """Safely execute a registered web or system tool with validated arguments."""
+    """Safely execute a registered web, API, or system tool with validated arguments."""
     if isinstance(args, str):
         try:
             args = json.loads(args) if args.strip() else {}
@@ -554,11 +502,20 @@ def execute_tool(
         except Exception as exc:
             return json.dumps({"error": f"Tool {name} failed: {exc}"})
 
+    if name in api_tools.API_TOOL_NAMES:
+        try:
+            res = api_tools.execute_api_tool(name, args, policy=api_policy)
+            return res if res is not None else json.dumps({"error": f"Unknown tool: {name}"})
+        except TypeError as exc:
+            return json.dumps({"error": f"Invalid arguments for {name}: {exc}"})
+        except Exception as exc:
+            return json.dumps({"error": f"Tool {name} failed: {exc}"})
+
     fn = TOOL_FUNCTIONS.get(name)
     if fn is None:
         return json.dumps({"error": f"Unknown tool: {name}"})
     try:
-        return str(fn(**args))
+        return str(fn(**_filter_callable_kwargs(fn, args)))
     except TypeError as exc:
         return json.dumps({"error": f"Invalid arguments for {name}: {exc}"})
     except Exception as exc:
@@ -594,6 +551,7 @@ class ChatbotConfig:
     max_tool_rounds: int = 5
     enable_system_tools: bool = False
     system_policy: Optional[system_tools.SystemToolsPolicy] = None
+    api_policy: Optional[api_tools.ApiToolsPolicy] = None
 
 
 def requires_api_key(provider: str) -> bool:
@@ -790,6 +748,280 @@ def _format_http_error(resp: httpx.Response) -> str:
     return f"HTTP {resp.status_code}: {raw[:300] or resp.reason_phrase}"
 
 
+def _spec_properties(spec: Dict[str, Any]) -> Dict[str, Any]:
+    """Return parameter schema mapping regardless of flat or OpenAI-nested spec shape."""
+    return spec.get("properties") or (spec.get("parameters") or {}).get("properties") or {}
+
+
+def _build_text_tool_system_prompt(include_web: bool, include_system: bool) -> str:
+    """Build compact prompt instructions for models without native OpenAI `tools` support."""
+    specs = _all_tool_specs(include_web=include_web, include_system=include_system)
+    if not specs:
+        return ""
+    tool_lines: List[str] = []
+    for spec in specs:
+        props = _spec_properties(spec)
+        params = ", ".join(props.keys()) or "none"
+        short_desc = str(spec.get("description") or "").split(".")[0].strip()
+        if len(short_desc) > 95:
+            short_desc = short_desc[:92].rstrip() + "..."
+        tool_lines.append(f"- {spec['name']} (params: {params}): {short_desc}")
+    return (
+        "IMPORTANT: You have live real-time tools available. Whenever the user asks for live "
+        "data (weather, gold/silver prices, news, web search, maps, database, email, calendar, "
+        "payments, custom APIs, current date/time, or PC files/folders/apps), you MUST invoke "
+        "a tool FIRST instead of answering from memory or guessing prices/weather.\n"
+        "Available tools:\n"
+        + "\n".join(tool_lines)
+        + "\n\nCRITICAL OUTPUT FORMAT WHEN CALLING A TOOL:\n"
+        "Output ONLY a single JSON block inside ```tool_call fences and NOTHING else (no intro text, "
+        "no sample answer after the fence):\n"
+        "```tool_call\n"
+        '{"name": "get_weather", "arguments": {"location": "Chennai"}}\n'
+        "```\n"
+        'For no-argument tools use "arguments": {} (e.g. {"name": "get_india_gold_price", "arguments": {}}).\n'
+        "If no tool is needed, reply normally in Markdown."
+    )
+
+
+def _could_be_text_tool_call_prefix(text: str, allowed_names: Optional[set[str]] = None) -> bool:
+    """Return True while leading streamed text might be the start of a text tool call."""
+    stripped = text.lstrip()
+    if not stripped:
+        return True
+    if stripped[0] in ("{", "[", "`"):
+        return True
+    if allowed_names:
+        if "(" in stripped:
+            head = stripped.split("(", 1)[0].strip()
+            if head in allowed_names:
+                return True
+        elif not any(ch.isspace() for ch in stripped):
+            if any(name.startswith(stripped) for name in allowed_names):
+                return True
+    return False
+
+
+def _coerce_text_tool_call_obj(obj: Any, allowed_names: set[str], idx: int) -> Optional[Dict[str, Any]]:
+    if not isinstance(obj, dict):
+        return None
+    name = str(obj.get("name") or obj.get("tool") or "").strip()
+    if not name or name not in allowed_names:
+        return None
+    raw_args = obj.get("arguments")
+    if raw_args is None:
+        raw_args = obj.get("args")
+    if raw_args is None:
+        raw_args = obj.get("parameters")
+    if raw_args is None:
+        raw_args = {}
+    if isinstance(raw_args, str):
+        try:
+            raw_args = json.loads(raw_args) if raw_args.strip() else {}
+        except json.JSONDecodeError:
+            raw_args = {}
+    if not isinstance(raw_args, dict):
+        raw_args = {}
+    return {
+        "id": f"text_call_{idx}",
+        "type": "function",
+        "function": {"name": name, "arguments": json.dumps(raw_args)},
+    }
+
+
+def _find_matching_paren(text: str, open_idx: int) -> Optional[int]:
+    """Return index of closing ')' matching text[open_idx] == '(', respecting strings."""
+    depth = 0
+    in_quote: Optional[str] = None
+    escaped = False
+    for idx in range(open_idx, len(text)):
+        ch = text[idx]
+        if in_quote:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == in_quote:
+                in_quote = None
+            continue
+        if ch in ('"', "'"):
+            in_quote = ch
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return idx
+    return None
+
+
+def _tool_param_names(fn_name: str) -> List[str]:
+    """Return ordered parameter names for any registered web, API, or system tool."""
+    fn = TOOL_FUNCTIONS.get(fn_name)
+    if fn is not None:
+        try:
+            return list(inspect.signature(fn).parameters.keys())
+        except (TypeError, ValueError):
+            pass
+    for spec in _all_tool_specs(include_web=True, include_system=True):
+        if spec.get("name") == fn_name:
+            return list(_spec_properties(spec).keys())
+    return []
+
+
+def _parse_python_call_args(fn_name: str, arg_text: str) -> Optional[Dict[str, Any]]:
+    """Safely parse argument list for a `fn_name(...)` text tool call without eval()."""
+    cleaned = arg_text.strip()
+    if not cleaned:
+        return {}
+    if cleaned.startswith("{") and cleaned.endswith("}"):
+        for loader in (json.loads, ast.literal_eval):
+            try:
+                parsed = loader(cleaned)
+                if isinstance(parsed, dict):
+                    return {str(k): v for k, v in parsed.items()}
+            except (json.JSONDecodeError, SyntaxError, ValueError):
+                pass
+    try:
+        expr = ast.parse(f"f({cleaned})", mode="eval")
+    except SyntaxError:
+        return None
+    call = expr.body
+    if not isinstance(call, ast.Call):
+        return None
+    kwargs: Dict[str, Any] = {}
+    if call.args:
+        if len(call.args) == 1 and not call.keywords:
+            try:
+                single = ast.literal_eval(call.args[0])
+                if isinstance(single, dict):
+                    return {str(k): v for k, v in single.items()}
+            except (SyntaxError, ValueError):
+                pass
+        param_names = _tool_param_names(fn_name)
+        for i, arg_node in enumerate(call.args):
+            if i >= len(param_names):
+                return None
+            try:
+                kwargs[param_names[i]] = ast.literal_eval(arg_node)
+            except (SyntaxError, ValueError):
+                return None
+    for kw in call.keywords:
+        if kw.arg is None:
+            return None
+        try:
+            kwargs[kw.arg] = ast.literal_eval(kw.value)
+        except (SyntaxError, ValueError):
+            return None
+    return kwargs
+
+
+def _extract_text_tool_calls(text: str, allowed_names: set[str]) -> Optional[List[Dict[str, Any]]]:
+    """Extract JSON or `fn(...)` tool calls emitted by local models in text_tool_mode."""
+    if not text or not allowed_names:
+        return None
+    decoder = json.JSONDecoder()
+    calls: List[Dict[str, Any]] = []
+    consumed_spans: List[Tuple[int, int]] = []
+    pos = 0
+    n = len(text)
+    while pos < n:
+        ch = text[pos]
+        if ch in ("{", "["):
+            try:
+                parsed, end_pos = decoder.raw_decode(text, pos)
+            except json.JSONDecodeError:
+                pos += 1
+                continue
+            items = parsed if isinstance(parsed, list) else [parsed]
+            matched_any = False
+            for item in items:
+                coerced = _coerce_text_tool_call_obj(item, allowed_names, len(calls))
+                if coerced is not None:
+                    calls.append(coerced)
+                    matched_any = True
+                elif (
+                    isinstance(item, dict)
+                    and not item.get("name")
+                    and not item.get("tool")
+                ):
+                    preceding = text[max(0, pos - 120):pos].rstrip()
+                    fn_match = re.search(r"([A-Za-z_][A-Za-z0-9_]*)\s*(?:\(\s*\))?\s*$", preceding)
+                    if fn_match and fn_match.group(1) in allowed_names:
+                        if any(k in item for k in ("arguments", "args", "parameters")):
+                            combined = dict(item)
+                            combined["name"] = fn_match.group(1)
+                        else:
+                            combined = {"name": fn_match.group(1), "arguments": item}
+                        coerced_adj = _coerce_text_tool_call_obj(combined, allowed_names, len(calls))
+                        if coerced_adj is not None:
+                            calls.append(coerced_adj)
+                            consumed_spans.append((max(0, pos - 120) + fn_match.start(), end_pos))
+                            matched_any = True
+            if matched_any:
+                consumed_spans.append((pos, end_pos))
+            pos = end_pos
+            continue
+        pos += 1
+
+    # Also support Python-style calls such as `get_weather({"city": "Chennai"})` or `get_india_gold_price()`.
+    for match in re.finditer(r"(?<![A-Za-z0-9_])([A-Za-z_][A-Za-z0-9_]*)\s*\(", text):
+        fn_name = match.group(1)
+        if fn_name not in allowed_names:
+            continue
+        start_idx = match.start()
+        if any(s <= start_idx < e for s, e in consumed_spans):
+            continue
+        open_idx = match.end() - 1
+        close_idx = _find_matching_paren(text, open_idx)
+        if close_idx is None:
+            continue
+        # Avoid false positives like "tool_name()\n{\"arguments\": ...}" already parsed above
+        parsed_args = _parse_python_call_args(fn_name, text[open_idx + 1:close_idx])
+        if parsed_args is None:
+            continue
+        calls.append(
+            {
+                "id": f"text_call_{len(calls)}",
+                "type": "function",
+                "function": {"name": fn_name, "arguments": json.dumps(parsed_args)},
+            }
+        )
+        consumed_spans.append((start_idx, close_idx + 1))
+
+    return calls or None
+
+
+def _should_stop_text_tool_stream(joined_round: str, allowed_names: set[str]) -> bool:
+    """Stop streaming Round 1 early once a complete tool call block has closed."""
+    stripped = joined_round.strip()
+    if not stripped:
+        return False
+    fences = re.findall(r"``+", stripped)
+    if fences:
+        if len(fences) >= 2 and re.search(r"``+\s*$", stripped):
+            return bool(_extract_text_tool_calls(joined_round, allowed_names))
+        return False
+    if (
+        (joined_round.endswith("\n\n") or (joined_round.endswith("\n") and stripped.endswith(("}", ")", "]"))))
+        and _extract_text_tool_calls(joined_round, allowed_names)
+    ):
+        return True
+    return False
+
+
+def _inject_text_tool_prompt(messages: List[Dict[str, Any]], tool_prompt: str) -> List[Dict[str, Any]]:
+    if not tool_prompt:
+        return list(messages)
+    out = [dict(m) for m in messages]
+    if out and out[0].get("role") == "system":
+        existing = str(out[0].get("content") or "").strip()
+        out[0]["content"] = f"{existing}\n\n{tool_prompt}" if existing else tool_prompt
+    else:
+        out.insert(0, {"role": "system", "content": tool_prompt})
+    return out
+
+
 # ============================================================
 # CHATBOT CORE
 # ============================================================
@@ -798,6 +1030,7 @@ class Chatbot:
     def __init__(self, config: Optional[ChatbotConfig] = None):
         self.config = config or ChatbotConfig()
         self.history: List[Message] = []
+        self._text_tool_models: set[Tuple[str, str]] = set()
         self._resolve_provider()
 
     def _resolve_provider(self) -> None:
@@ -821,6 +1054,7 @@ class Chatbot:
         use_tools: Optional[bool] = None,
         enable_system_tools: Optional[bool] = None,
         system_policy: Optional[system_tools.SystemToolsPolicy] = None,
+        api_policy: Optional[api_tools.ApiToolsPolicy] = None,
     ) -> None:
         """Update runtime configuration without losing conversation history."""
         if provider is not None and provider != self.config.provider:
@@ -843,12 +1077,26 @@ class Chatbot:
             self.config.enable_system_tools = bool(enable_system_tools)
         if system_policy is not None:
             self.config.system_policy = system_policy
+        if api_policy is not None:
+            self.config.api_policy = api_policy
         self._resolve_provider()
 
     def _active_system_policy(self) -> Optional[system_tools.SystemToolsPolicy]:
         if not self.config.enable_system_tools:
             return None
         return self.config.system_policy or system_tools.SystemToolsPolicy(enabled=True)
+
+    def _active_api_policy(self) -> api_tools.ApiToolsPolicy:
+        if self.config.api_policy is not None:
+            return self.config.api_policy
+        sys_pol = self.config.system_policy
+        if sys_pol is not None:
+            return api_tools.ApiToolsPolicy(
+                confirm_callback=sys_pol.confirm_callback,
+                allowed_roots=list(sys_pol.allowed_roots),
+                allow_all_non_system=bool(sys_pol.allow_all_non_system),
+            )
+        return api_tools.ApiToolsPolicy()
 
     def reset_history(self) -> None:
         self.history.clear()
@@ -1102,7 +1350,12 @@ class Chatbot:
                         fn_name = fc.get("name", "")
                         fn_args = fc.get("args") or {}
                         yield {"type": "tool_start", "name": fn_name, "args": fn_args}
-                        result_str = execute_tool(fn_name, fn_args, system_policy=self._active_system_policy())
+                        result_str = execute_tool(
+                            fn_name,
+                            fn_args,
+                            system_policy=self._active_system_policy(),
+                            api_policy=self._active_api_policy(),
+                        )
                         yield {"type": "tool_end", "name": fn_name, "result": result_str}
                         recorded_tools.append(
                             {"name": fn_name, "args": fn_args, "result": result_str}
@@ -1206,18 +1459,29 @@ class Chatbot:
             with httpx.Client(timeout=httpx.Timeout(120.0, connect=15.0)) as client:
                 round_idx = 0
                 retried_model = False
+                model_cache_key = (base.lower(), self.config.model_name)
+                # Ollama defaults to 4096 context, where 25 verbose JSON schemas (~3.4k tokens)
+                # cause HTTP 400 or silent tool drops (e.g. Mistral); compact text_tool_mode fits comfortably.
+                text_tool_mode = (provider == "ollama") or (model_cache_key in self._text_tool_models)
                 while round_idx <= self.config.max_tool_rounds:
                     if cancel_event and cancel_event.is_set():
                         break
 
+                    request_messages = messages
+                    if (tools_enabled or include_system) and text_tool_mode:
+                        request_messages = _inject_text_tool_prompt(
+                            messages,
+                            _build_text_tool_system_prompt(tools_enabled, include_system),
+                        )
+
                     payload: Dict[str, Any] = {
                         "model": self.config.model_name,
-                        "messages": messages,
+                        "messages": request_messages,
                         "temperature": self.config.temperature,
                         "max_tokens": self.config.max_tokens,
                         "stream": True,
                     }
-                    if tools_enabled or include_system:
+                    if (tools_enabled or include_system) and not text_tool_mode:
                         payload["tools"] = build_openai_tools(
                             include_system=include_system,
                             include_web=tools_enabled,
@@ -1225,18 +1489,29 @@ class Chatbot:
                         payload["tool_choice"] = "auto"
 
                     round_text_parts: List[str] = []
+                    round_start_chunk_idx = len(answer_chunks)
                     tool_calls_by_idx: Dict[int, Dict[str, Any]] = {}
+                    allowed_text_tool_names = (
+                        {
+                            s["name"]
+                            for s in _all_tool_specs(include_web=tools_enabled, include_system=include_system)
+                        }
+                        if text_tool_mode and (tools_enabled or include_system)
+                        else set()
+                    )
+                    buffer_for_tool_check = bool(allowed_text_tool_names)
 
                     with client.stream("POST", url, headers=headers, json=payload) as resp:
                         if resp.status_code != 200:
                             err = _format_http_error(resp)
                             if (
                                 resp.status_code == 400
+                                and not text_tool_mode
                                 and (tools_enabled or include_system)
                                 and ("tool" in err.lower() or "function" in err.lower())
                             ):
-                                tools_enabled = False
-                                include_system = False
+                                self._text_tool_models.add(model_cache_key)
+                                text_tool_mode = True
                                 continue
                             if resp.status_code == 404 and not retried_model:
                                 low = err.lower()
@@ -1247,6 +1522,8 @@ class Chatbot:
                                     fallback = _pick_fallback_model(provider, self.config.model_name, base, api_key)
                                     if fallback:
                                         self.config.model_name = fallback
+                                        model_cache_key = (base.lower(), self.config.model_name)
+                                        text_tool_mode = model_cache_key in self._text_tool_models
                                         retried_model = True
                                         continue
                             self.add_message(Message(role="assistant", content=f"[Error: {err}]"))
@@ -1271,8 +1548,23 @@ class Chatbot:
                             content_piece = delta.get("content")
                             if content_piece:
                                 round_text_parts.append(content_piece)
-                                answer_chunks.append(content_piece)
-                                yield {"type": "token", "content": content_piece}
+                                if buffer_for_tool_check:
+                                    joined_round = "".join(round_text_parts)
+                                    if not _could_be_text_tool_call_prefix(joined_round, allowed_text_tool_names):
+                                        buffer_for_tool_check = False
+                                        answer_chunks.append(joined_round)
+                                        yield {"type": "token", "content": joined_round}
+                                else:
+                                    answer_chunks.append(content_piece)
+                                    yield {"type": "token", "content": content_piece}
+
+                                if (
+                                    allowed_text_tool_names
+                                    and any(c in content_piece for c in ("`", "\n", "}", ")"))
+                                ):
+                                    joined_now = "".join(round_text_parts)
+                                    if _should_stop_text_tool_stream(joined_now, allowed_text_tool_names):
+                                        break
 
                             for tc_delta in delta.get("tool_calls") or []:
                                 idx = tc_delta.get("index", 0)
@@ -1295,15 +1587,43 @@ class Chatbot:
                     if cancel_event and cancel_event.is_set():
                         break
 
+                    round_text = "".join(round_text_parts)
+                    ordered_calls: List[Dict[str, Any]] = []
+                    used_text_tool_call = False
                     if tool_calls_by_idx and (tools_enabled or include_system):
                         ordered_calls = [tool_calls_by_idx[k] for k in sorted(tool_calls_by_idx)]
-                        messages.append(
-                            {
-                                "role": "assistant",
-                                "content": "".join(round_text_parts) or None,
-                                "tool_calls": ordered_calls,
-                            }
-                        )
+                    elif text_tool_mode and (tools_enabled or include_system) and round_text.strip():
+                        allowed_names = {
+                            s["name"]
+                            for s in _all_tool_specs(include_web=tools_enabled, include_system=include_system)
+                        }
+                        extracted = _extract_text_tool_calls(round_text, allowed_names)
+                        if extracted:
+                            ordered_calls = extracted
+                            used_text_tool_call = True
+                        elif buffer_for_tool_check:
+                            buffer_for_tool_check = False
+                            answer_chunks.append(round_text)
+                            yield {"type": "token", "content": round_text}
+                    elif buffer_for_tool_check and round_text:
+                        buffer_for_tool_check = False
+                        answer_chunks.append(round_text)
+                        yield {"type": "token", "content": round_text}
+
+                    if ordered_calls and (tools_enabled or include_system):
+                        if not used_text_tool_call:
+                            messages.append(
+                                {
+                                    "role": "assistant",
+                                    "content": round_text or None,
+                                    "tool_calls": ordered_calls,
+                                }
+                            )
+                        else:
+                            del answer_chunks[round_start_chunk_idx:]
+                            messages.append({"role": "assistant", "content": round_text})
+
+                        text_obs_blocks: List[str] = []
                         for tc in ordered_calls:
                             fn_name = tc["function"]["name"]
                             raw_args = tc["function"]["arguments"]
@@ -1313,17 +1633,38 @@ class Chatbot:
                                 parsed_args = {}
 
                             yield {"type": "tool_start", "name": fn_name, "args": parsed_args}
-                            result_str = execute_tool(fn_name, raw_args, system_policy=self._active_system_policy())
+                            result_str = execute_tool(
+                                fn_name,
+                                raw_args,
+                                system_policy=self._active_system_policy(),
+                                api_policy=self._active_api_policy(),
+                            )
                             yield {"type": "tool_end", "name": fn_name, "result": result_str}
                             recorded_tools.append(
                                 {"name": fn_name, "args": parsed_args, "result": result_str}
                             )
+                            if not used_text_tool_call:
+                                messages.append(
+                                    {
+                                        "role": "tool",
+                                        "tool_call_id": tc["id"],
+                                        "name": fn_name,
+                                        "content": result_str,
+                                    }
+                                )
+                            else:
+                                text_obs_blocks.append(f"[Tool {fn_name} result]:\n{result_str}")
+
+                        if used_text_tool_call:
                             messages.append(
                                 {
-                                    "role": "tool",
-                                    "tool_call_id": tc["id"],
-                                    "name": fn_name,
-                                    "content": result_str,
+                                    "role": "user",
+                                    "content": (
+                                        "\n\n".join(text_obs_blocks)
+                                        + "\n\nNow answer the user's request clearly using ONLY these "
+                                        "verified real-time tool results. Do not emit another tool_call "
+                                        "unless a follow-up tool is genuinely needed."
+                                    ),
                                 }
                             )
                         round_idx += 1
@@ -1408,11 +1749,12 @@ class Chatbot:
                 sz_path = drive_root or folder
                 tool_plan = ("get_folder_size", {"path": sz_path} if sz_path else {})
             elif any(kw in lower for kw in ("search", "find")) and not any(
-                w in lower for w in ("gold", "silver", "news", "time", "date")
+                w in lower for w in ("gold", "silver", "news", "time", "date", "weather", "forecast", "custom api", "maps")
             ):
                 skip_words = {
-                    "search", "find", "for", "files", "file", "my", "in", "on",
-                    "the", "folder", "drive", "drives", "downloads", "desktop", "documents", "please",
+                    "search", "find", "for", "files", "file", "folders", "folder", "directory", "directories",
+                    "name", "named", "called", "with", "of", "my", "me", "a", "an", "to", "in", "on",
+                    "the", "drive", "drives", "downloads", "desktop", "documents", "please",
                 }
                 if drive_m:
                     d_ch = (drive_m.group(1) or drive_m.group(2)).lower()
@@ -1448,7 +1790,26 @@ class Chatbot:
                 tool_plan = ("list_directory", {"path": folder} if folder else {})
 
         if tool_plan is None and tools_enabled:
-            if "gold" in lower or "silver" in lower:
+            if any(kw in lower for kw in ("weather", "forecast", "temperature")):
+                wm = re.search(
+                    r"(?:weather|forecast|temperature)\s+(?:today\s+|now\s+|currently\s+)?(?:in|at|for|of)\s+(.+?)\s*[?.!]*$",
+                    user_input,
+                    re.IGNORECASE,
+                )
+                if wm and wm.group(1).strip():
+                    city = wm.group(1).strip(" '\"")
+                else:
+                    w_skip = {
+                        "what", "is", "today's", "todays", "today", "the", "current", "live",
+                        "check", "get", "show", "tell", "me", "weather", "forecast", "temperature",
+                        "in", "at", "for", "of", "please",
+                    }
+                    w_tokens = [t.strip(" ?.,'\"") for t in user_input.split() if t.strip(" ?.,'\"").lower() not in w_skip]
+                    city = " ".join(w_tokens).strip()
+                tool_plan = ("get_weather", {"location": city}) if city else None
+            elif any(kw in lower for kw in ("custom api", "custom apis", "registered api", "internal api")):
+                tool_plan = ("list_custom_apis", {})
+            elif "gold" in lower or "silver" in lower:
                 tool_plan = ("get_india_gold_price", {})
             elif "news" in lower:
                 topic = user_input.replace("news", "").strip(" ?.:") or "India"
@@ -1460,7 +1821,10 @@ class Chatbot:
             fn_name, fn_args = tool_plan
             yield {"type": "tool_start", "name": fn_name, "args": fn_args}
             result_str = execute_tool(
-                fn_name, fn_args, system_policy=self._active_system_policy()
+                fn_name,
+                fn_args,
+                system_policy=self._active_system_policy(),
+                api_policy=self._active_api_policy(),
             )
             yield {"type": "tool_end", "name": fn_name, "result": result_str}
             recorded_tools.append({"name": fn_name, "args": fn_args, "result": result_str})

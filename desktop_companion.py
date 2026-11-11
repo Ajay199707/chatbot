@@ -40,6 +40,7 @@ import weakref
 
 from PySide6 import QtCore, QtGui, QtNetwork, QtWidgets
 
+import api_tools
 import chatbot
 import system_tools
 
@@ -137,9 +138,16 @@ def build_effective_system_prompt(
     parts = [f"Your name is {clean_name}.", clean_persona]
     if use_tools:
         parts.append(
-            "When the user asks about live web information, gold/silver prices in India, latest news, "
-            "or the current date/time, call your available tools first and cite the real-time result honestly."
+            "When the user asks about live weather (use get_weather), web information (web_search), "
+            "gold/silver prices in India (get_india_gold_price), latest news (get_news), current date/time "
+            "(get_current_datetime), maps/places/directions (maps_lookup), databases (database_query), "
+            "email (email_action), calendar events (calendar_action), payments (payment_action), "
+            "or custom/company internal APIs (list_custom_apis / call_custom_api), call your available tools first "
+            "and report the real-time result honestly."
         )
+        custom_summary = api_tools.custom_apis_prompt_summary()
+        if custom_summary:
+            parts.append(custom_summary)
     if enable_system_tools:
         parts.append(
             "You also have PC & File Control tools (search_files, list_drives, list_directory, get_folder_size, "
@@ -1058,6 +1066,7 @@ class ChatPopupWindow(QtWidgets.QWidget):
     settings_requested = QtCore.Signal()
     mock_mode_requested = QtCore.Signal()
     provider_switch_requested = QtCore.Signal(str, str)
+    enable_web_tools_requested = QtCore.Signal()
 
     def __init__(self, config: CharacterConfig):
         super().__init__(
@@ -1097,7 +1106,7 @@ class ChatPopupWindow(QtWidgets.QWidget):
                 color: #e2e8f0;
                 border: 1px solid #334155;
                 border-radius: 7px;
-                padding: 4px 8px;
+                padding: 4px 7px;
                 font-size: 11px;
                 font-weight: 600;
             }
@@ -1139,7 +1148,7 @@ class ChatPopupWindow(QtWidgets.QWidget):
         self._header.setCursor(QtCore.Qt.CursorShape.SizeAllCursor)
         hbox = QtWidgets.QHBoxLayout(self._header)
         hbox.setContentsMargins(0, 0, 0, 4)
-        hbox.setSpacing(8)
+        hbox.setSpacing(5)
 
         self._avatar_lbl = QtWidgets.QLabel()
         self._avatar_lbl.setFixedSize(34, 34)
@@ -1151,6 +1160,7 @@ class ChatPopupWindow(QtWidgets.QWidget):
         self._name_lbl.setStyleSheet("font-size: 14px; font-weight: 700; color: #f8fafc;")
         self._status_lbl = QtWidgets.QLabel("Ready")
         self._status_lbl.setStyleSheet("font-size: 11px; color: #94a3b8;")
+        self._status_lbl.setWordWrap(True)
         self._status_lbl.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Ignored,
             QtWidgets.QSizePolicy.Policy.Preferred,
@@ -1175,7 +1185,7 @@ class ChatPopupWindow(QtWidgets.QWidget):
         hbox.addWidget(clear_btn)
 
         close_btn = QtWidgets.QPushButton("×")
-        close_btn.setFixedWidth(28)
+        close_btn.setFixedWidth(24)
         close_btn.clicked.connect(self.hide)
         hbox.addWidget(close_btn)
         root.addWidget(self._header)
@@ -1236,9 +1246,34 @@ class ChatPopupWindow(QtWidgets.QWidget):
         self._quota_banner.setVisible(False)
         root.addWidget(self._quota_banner)
 
-        # Chat messages scroll area
+        # Disabled Web & API tools reminder banner
+        self._tools_off_banner = QtWidgets.QFrame()
+        self._tools_off_banner.setStyleSheet(
+            "QFrame{background:#1e1b4b;border:1px solid #6366f1;border-radius:8px;}"
+            "QLabel{color:#c7d2fe;font-size:11px;border:none;background:transparent;}"
+        )
+        t_row = QtWidgets.QHBoxLayout(self._tools_off_banner)
+        t_row.setContentsMargins(8, 5, 8, 5)
+        t_row.setSpacing(6)
+        tools_off_lbl = QtWidgets.QLabel(
+            "Web & API tools are OFF (Weather, Gold, News, Search)."
+        )
+        tools_off_lbl.setWordWrap(True)
+        tools_off_lbl.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Ignored,
+            QtWidgets.QSizePolicy.Policy.Preferred,
+        )
+        turn_on_btn = QtWidgets.QPushButton("Turn On")
+        turn_on_btn.clicked.connect(self.enable_web_tools_requested.emit)
+        t_row.addWidget(tools_off_lbl, 1)
+        t_row.addWidget(turn_on_btn)
+        self._tools_off_banner.setVisible(False)
+        root.addWidget(self._tools_off_banner)
+
+        # Chat messages scroll area (wheel/auto-scroll active, scrollbars hidden)
         self._scroll = QtWidgets.QScrollArea()
         self._scroll.setWidgetResizable(True)
+        self._scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
         self._msg_container = QtWidgets.QWidget()
@@ -1265,9 +1300,10 @@ class ChatPopupWindow(QtWidgets.QWidget):
         chips_row.setSpacing(6)
         self._files_chip: Optional[QtWidgets.QPushButton] = None
         for label, prompt in [
-            ("Web Search", "Search the web for the latest tech breakthroughs today."),
-            ("Gold Rate", "What is today's gold rate in India?"),
-            ("Latest News", "What is the latest tech news?"),
+            ("Weather", "What is today's weather in Chennai?"),
+            ("Search", "Search the web for the latest tech breakthroughs today."),
+            ("Gold", "What is today's gold rate in India?"),
+            ("News", "What is the latest tech news?"),
             ("Time", "What date and time is it?"),
             ("Files", "List all my PC drives and allowed folders."),
         ]:
@@ -1290,6 +1326,8 @@ class ChatPopupWindow(QtWidgets.QWidget):
         input_row.setSpacing(8)
         self._input = PromptInputBox()
         self._input.setFixedHeight(62)
+        self._input.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._input.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._input.setPlaceholderText("Ask anything... (Enter to send, Shift+Enter newline)")
         self._input.submit_requested.connect(self._on_send_clicked)
         input_row.addWidget(self._input, 1)
@@ -1323,13 +1361,15 @@ class ChatPopupWindow(QtWidgets.QWidget):
         self._config = config
         self._name_lbl.setText(config.character_name or "Lumi")
         model = config.model_name or chatbot.default_model_for_provider(config.provider)
+        web_badge = "" if config.use_tools else " · Web/API OFF"
         if config.enable_system_tools and config.allow_all_user_folders:
             pc_badge = " · PC Control ON · All Drives"
         elif config.enable_system_tools:
             pc_badge = " · PC Control ON"
         else:
             pc_badge = ""
-        self._status_lbl.setText(f"{config.provider} · {model}{pc_badge}")
+        self._status_lbl.setText(f"{config.provider} · {model}{web_badge}{pc_badge}")
+        self._tools_off_banner.setVisible(not bool(config.use_tools))
         if self._files_chip is not None:
             self._files_chip.setVisible(bool(config.enable_system_tools))
         self._avatar_lbl.setPixmap(draw_pet_pixmap(34, config.sprite_path))
@@ -1380,7 +1420,7 @@ class ChatPopupWindow(QtWidgets.QWidget):
         row.addStretch(1)
         lbl = QtWidgets.QLabel(text)
         lbl.setWordWrap(True)
-        lbl.setMaximumWidth(310)
+        lbl.setMaximumWidth(332)
         lbl.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
         lbl.setStyleSheet(
             "background:#2563eb;color:#ffffff;padding:8px 12px;"
@@ -1426,6 +1466,14 @@ class ChatPopupWindow(QtWidgets.QWidget):
         elif not self._render_timer.isActive():
             self._render_timer.start()
 
+    def reset_streaming_preview(self, status_html: str = "<i>Working...</i>") -> None:
+        self._render_timer.stop()
+        self._streaming_text = ""
+        if self._streaming_bubble is not None:
+            self._streaming_bubble.setHtml(status_html)
+            self._sync_browser_height(self._streaming_bubble)
+            self._scroll_to_bottom()
+
     def finish_assistant_message(self, final_text: str) -> None:
         self._render_timer.stop()
         if self._streaming_bubble is not None and final_text:
@@ -1455,7 +1503,7 @@ class ChatPopupWindow(QtWidgets.QWidget):
         self._scroll_to_bottom()
 
     def _sync_browser_height(self, browser: QtWidgets.QTextBrowser) -> None:
-        browser.document().setTextWidth(max(220, self._scroll.viewport().width() - 28))
+        browser.document().setTextWidth(max(220, self._scroll.viewport().width() - 24))
         doc_h = int(browser.document().size().height()) + 20
         browser.setFixedHeight(max(38, doc_h))
 
@@ -1463,6 +1511,7 @@ class ChatPopupWindow(QtWidgets.QWidget):
         self._scroll_timer.start()
 
     def _do_scroll_to_bottom(self) -> None:
+        self._msg_layout.activate()
         bar = self._scroll.verticalScrollBar()
         bar.setValue(bar.maximum())
 
@@ -1499,55 +1548,400 @@ class ChatPopupWindow(QtWidgets.QWidget):
 # CUSTOMIZE CHARACTER & PERSONA DIALOG
 # ============================================================
 
+_DARK_DIALOG_QSS = (
+    "QDialog{background:#0f172a;color:#e2e8f0;font-size:12px;}"
+    "QLabel,QCheckBox{color:#cbd5e1;font-weight:600;}"
+    "QCheckBox{spacing:8px;}"
+    "QGroupBox{background:#111c33;border:1px solid #293548;border-radius:10px;"
+    "margin-top:10px;padding:12px 12px 8px 12px;font-weight:700;color:#93c5fd;}"
+    "QGroupBox::title{subcontrol-origin:margin;left:12px;padding:0 6px;}"
+    "QTabWidget::pane{border:1px solid #293548;border-radius:10px;background:#0f172a;top:-1px;}"
+    "QTabBar::tab{background:#1e293b;color:#94a3b8;border:1px solid #293548;"
+    "border-bottom:none;border-top-left-radius:8px;border-top-right-radius:8px;"
+    "padding:7px 14px;margin-right:4px;font-weight:600;}"
+    "QTabBar::tab:selected{background:#2563eb;color:#ffffff;border-color:#2563eb;}"
+    "QTabBar::tab:hover:!selected{background:#293548;color:#e2e8f0;}"
+    "QLineEdit,QComboBox,QPlainTextEdit,QSpinBox,QListWidget{background:#1e293b;color:#f8fafc;"
+    "border:1px solid #334155;border-radius:7px;padding:4px 8px;}"
+    "QListWidget::item{padding:5px 6px;border-radius:5px;}"
+    "QListWidget::item:selected{background:#1d4ed8;color:#ffffff;}"
+    "QLineEdit:focus,QComboBox:focus,QPlainTextEdit:focus,QSpinBox:focus,QListWidget:focus{border-color:#38bdf8;}"
+    "QPushButton{background:#1e293b;color:#e2e8f0;border:1px solid #334155;"
+    "border-radius:7px;padding:5px 12px;font-weight:600;}"
+    "QPushButton:hover{background:#334155;}"
+    "QPushButton#primaryBtn{background:#2563eb;color:#ffffff;border-color:#2563eb;}"
+    "QPushButton#primaryBtn:hover{background:#1d4ed8;}"
+)
+
+
+_BUILTIN_API_FIELD_TABS: Tuple[Tuple[str, Tuple[Tuple[str, str, bool, str], ...]], ...] = (
+    (
+        "Weather, Maps && DB",
+        (
+            ("OPENWEATHER_API_KEY", "OpenWeather Key:", True, "Optional (free Open-Meteo works with no key)"),
+            ("NEWSAPI_KEY", "NewsAPI.org Key:", True, "Optional (free Google News RSS works with no key)"),
+            ("GOOGLE_MAPS_API_KEY", "Google Maps Key:", True, "Optional (Nominatim works with no key)"),
+            ("SQLITE_DB_PATH", "SQLite DB Path:", False, "Path to local .db file (optional)"),
+            ("DATABASE_API_URL", "Database REST URL:", False, "e.g. https://project.supabase.co/rest/v1"),
+            ("DATABASE_API_KEY", "Database API Key:", True, "Bearer / apikey token for Database REST API"),
+        ),
+    ),
+    (
+        "Email && Calendar",
+        (
+            ("EMAIL_USER", "Email Address:", False, "e.g. your.name@gmail.com"),
+            ("EMAIL_PASSWORD", "Email App Password:", True, "SMTP / IMAP password or Gmail App Password"),
+            ("SMTP_HOST", "SMTP Host:", False, "Auto-detected for Gmail, or e.g. smtp.office365.com"),
+            ("SMTP_PORT", "SMTP Port:", False, "Default 587 (or 465 for SSL)"),
+            ("IMAP_HOST", "IMAP Host:", False, "Auto-detected for Gmail, or e.g. outlook.office365.com"),
+            ("GOOGLE_CALENDAR_TOKEN", "Google Cal Token:", True, "OAuth Bearer token for Google Calendar API"),
+            ("CALENDAR_ICS_URL", "Calendar .ics URL:", False, "Optional private iCal feed URL (read-only)"),
+            ("CALENDAR_ICS_PATH", "Local .ics File:", False, "Optional path to local .ics calendar file"),
+        ),
+    ),
+    (
+        "Payments",
+        (
+            ("STRIPE_API_KEY", "Stripe Secret Key:", True, "sk_test_... or sk_live_..."),
+            ("RAZORPAY_KEY_ID", "Razorpay Key ID:", True, "rzp_test_... or rzp_live_..."),
+            ("RAZORPAY_KEY_SECRET", "Razorpay Secret:", True, "Razorpay API key secret"),
+        ),
+    ),
+)
+
+
+class BuiltInApisDialog(QtWidgets.QDialog):
+    """Compact tabbed dialog for saving Weather/Maps/DB/Email/Calendar/Payment keys to .env."""
+
+    def __init__(self, parent: Optional[QtWidgets.QWidget] = None):
+        super().__init__(parent)
+        self.setWindowTitle("Configure Built-in API Credentials (.env)")
+        self.setMinimumSize(620, 420)
+        self.resize(650, 460)
+        self.setStyleSheet(_DARK_DIALOG_QSS)
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(10)
+
+        note = QtWidgets.QLabel(
+            "Leave already configured password fields blank to keep existing keys. "
+            "Secrets are saved locally to .env (never in JSON config files)."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet("color:#94a3b8;font-size:11px;font-weight:400;")
+        layout.addWidget(note)
+
+        self._edits: Dict[str, Tuple[QtWidgets.QLineEdit, bool]] = {}
+        tabs = QtWidgets.QTabWidget()
+        for tab_title, rows in _BUILTIN_API_FIELD_TABS:
+            page = QtWidgets.QWidget()
+            form = QtWidgets.QFormLayout(page)
+            form.setContentsMargins(12, 12, 12, 10)
+            form.setHorizontalSpacing(12)
+            form.setVerticalSpacing(7)
+            form.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+            for env_key, label, is_secret, hint in rows:
+                edit = QtWidgets.QLineEdit()
+                existing = os.getenv(env_key, "").strip()
+                if is_secret:
+                    edit.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password)
+                    edit.setPlaceholderText("Configured (leave blank to keep)" if existing else hint)
+                else:
+                    edit.setText(existing)
+                    edit.setPlaceholderText(hint)
+                self._edits[env_key] = (edit, is_secret)
+                if env_key == "SQLITE_DB_PATH":
+                    row_box = QtWidgets.QHBoxLayout()
+                    row_box.setSpacing(6)
+                    browse_btn = QtWidgets.QPushButton("Browse...")
+                    browse_btn.clicked.connect(lambda _=False, e=edit: self._pick_db_file(e))
+                    row_box.addWidget(edit, 1)
+                    row_box.addWidget(browse_btn)
+                    form.addRow(label, row_box)
+                else:
+                    form.addRow(label, edit)
+            tabs.addTab(page, tab_title)
+        layout.addWidget(tabs, 1)
+
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Save | QtWidgets.QDialogButtonBox.StandardButton.Cancel
+        )
+        save_btn = buttons.button(QtWidgets.QDialogButtonBox.StandardButton.Save)
+        if save_btn is not None:
+            save_btn.setObjectName("primaryBtn")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _pick_db_file(self, target_edit: QtWidgets.QLineEdit) -> None:
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Select SQLite Database", "", "SQLite Databases (*.db *.sqlite *.sqlite3);;All Files (*.*)"
+        )
+        if path:
+            target_edit.setText(path)
+
+    def save_to_env(self, env_path: Optional[Path] = None) -> int:
+        saved = 0
+        for env_key, (edit, is_secret) in self._edits.items():
+            val = edit.text().strip()
+            if val:
+                if val != os.getenv(env_key, "").strip() or is_secret:
+                    chatbot.save_env_key(env_key, val, env_path=env_path)
+                    saved += 1
+        return saved
+
+
+class CustomApiEditorDialog(QtWidgets.QDialog):
+    """Add or edit a user-registered custom / company internal REST API endpoint."""
+
+    def __init__(
+        self,
+        endpoint: Optional[api_tools.CustomApiEndpoint] = None,
+        parent: Optional[QtWidgets.QWidget] = None,
+    ):
+        super().__init__(parent)
+        self.setWindowTitle("Add / Edit Custom or Company Internal API")
+        self.setMinimumSize(620, 500)
+        self.resize(650, 540)
+        self.setStyleSheet(_DARK_DIALOG_QSS)
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(8)
+
+        form = QtWidgets.QFormLayout()
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(7)
+        form.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+
+        self._template_combo = QtWidgets.QComboBox()
+        self._template_combo.addItem("-- Load Quick Template (Optional) --")
+        for key in api_tools.PRESET_TEMPLATES:
+            self._template_combo.addItem(key)
+        self._template_combo.currentTextChanged.connect(self._on_template_chosen)
+        form.addRow("Quick Template:", self._template_combo)
+
+        self._name_edit = QtWidgets.QLineEdit(endpoint.name if endpoint else "")
+        self._name_edit.setPlaceholderText("e.g. Company HR Service")
+        form.addRow("Display Name:", self._name_edit)
+
+        self._id_edit = QtWidgets.QLineEdit(endpoint.id if endpoint else "")
+        self._id_edit.setPlaceholderText("Unique ID e.g. company_hr (auto-generated if blank)")
+        form.addRow("API ID:", self._id_edit)
+
+        cat_method_row = QtWidgets.QHBoxLayout()
+        cat_method_row.setSpacing(8)
+        self._cat_combo = QtWidgets.QComboBox()
+        self._cat_combo.addItems(list(api_tools.CUSTOM_API_CATEGORIES))
+        if endpoint and endpoint.category in api_tools.CUSTOM_API_CATEGORIES:
+            self._cat_combo.setCurrentText(endpoint.category)
+        self._method_combo = QtWidgets.QComboBox()
+        self._method_combo.addItems(["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"])
+        if endpoint:
+            self._method_combo.setCurrentText(endpoint.method)
+        cat_method_row.addWidget(self._cat_combo, 2)
+        cat_method_row.addWidget(QtWidgets.QLabel("Method:"))
+        cat_method_row.addWidget(self._method_combo, 1)
+        form.addRow("Category:", cat_method_row)
+
+        self._base_url_edit = QtWidgets.QLineEdit(endpoint.base_url if endpoint else "")
+        self._base_url_edit.setPlaceholderText("https://api.yourcompany.com/v1")
+        form.addRow("Base URL:", self._base_url_edit)
+
+        self._path_edit = QtWidgets.QLineEdit(endpoint.default_path if endpoint else "")
+        self._path_edit.setPlaceholderText("/employees (optional default endpoint path)")
+        form.addRow("Default Path:", self._path_edit)
+
+        auth_row = QtWidgets.QHBoxLayout()
+        auth_row.setSpacing(8)
+        self._auth_combo = QtWidgets.QComboBox()
+        self._auth_combo.addItems(list(api_tools.AUTH_TYPES))
+        if endpoint:
+            self._auth_combo.setCurrentText(endpoint.auth_type)
+        self._auth_param_edit = QtWidgets.QLineEdit(endpoint.auth_param if endpoint else "")
+        self._auth_param_edit.setPlaceholderText("Header/param e.g. Authorization or X-API-Key")
+        auth_row.addWidget(self._auth_combo, 1)
+        auth_row.addWidget(self._auth_param_edit, 2)
+        form.addRow("Auth Type / Param:", auth_row)
+
+        secret_row = QtWidgets.QHBoxLayout()
+        secret_row.setSpacing(8)
+        self._secret_name_edit = QtWidgets.QLineEdit(endpoint.env_secret_name if endpoint else "")
+        self._secret_name_edit.setPlaceholderText(".env key name e.g. COMPANY_API_TOKEN")
+        self._secret_val_edit = QtWidgets.QLineEdit()
+        self._secret_val_edit.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password)
+        existing_secret = bool(endpoint and endpoint.env_secret_name and os.getenv(endpoint.env_secret_name))
+        self._secret_val_edit.setPlaceholderText(
+            "Configured in .env (blank keeps)" if existing_secret else "Paste token/key (optional)"
+        )
+        secret_row.addWidget(self._secret_name_edit, 1)
+        secret_row.addWidget(self._secret_val_edit, 1)
+        form.addRow(".env Key / Secret:", secret_row)
+
+        self._confirm_combo = QtWidgets.QComboBox()
+        self._confirm_combo.addItems(list(api_tools.CONFIRMATION_MODES))
+        if endpoint:
+            self._confirm_combo.setCurrentText(endpoint.confirmation_mode)
+        form.addRow("Allow/Deny Rule:", self._confirm_combo)
+
+        self._desc_edit = QtWidgets.QPlainTextEdit(endpoint.description if endpoint else "")
+        self._desc_edit.setFixedHeight(74)
+        self._desc_edit.setLineWrapMode(QtWidgets.QPlainTextEdit.LineWrapMode.WidgetWidth)
+        self._desc_edit.setPlaceholderText(
+            "Tell the AI what this API does, expected endpoint paths, query params, or JSON body fields."
+        )
+        form.addRow("AI Description:", self._desc_edit)
+
+        self._enabled_chk = QtWidgets.QCheckBox("Enable this API endpoint for AI tool calls")
+        self._enabled_chk.setChecked(endpoint.enabled if endpoint else True)
+        form.addRow("", self._enabled_chk)
+        layout.addLayout(form, 1)
+
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Save | QtWidgets.QDialogButtonBox.StandardButton.Cancel
+        )
+        save_btn = buttons.button(QtWidgets.QDialogButtonBox.StandardButton.Save)
+        if save_btn is not None:
+            save_btn.setObjectName("primaryBtn")
+        buttons.accepted.connect(self._validate_and_accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _on_template_chosen(self, label: str) -> None:
+        tpl = api_tools.PRESET_TEMPLATES.get(label)
+        if not tpl:
+            return
+        self._id_edit.setText(tpl.get("id", ""))
+        self._name_edit.setText(tpl.get("name", ""))
+        self._cat_combo.setCurrentText(tpl.get("category", "Custom"))
+        self._method_combo.setCurrentText(tpl.get("method", "GET"))
+        self._base_url_edit.setText(tpl.get("base_url", ""))
+        self._path_edit.setText(tpl.get("default_path", ""))
+        self._auth_combo.setCurrentText(tpl.get("auth_type", "none"))
+        self._auth_param_edit.setText(tpl.get("auth_param", ""))
+        self._secret_name_edit.setText(tpl.get("env_secret_name", ""))
+        self._confirm_combo.setCurrentText(tpl.get("confirmation_mode", "auto"))
+        self._desc_edit.setPlainText(tpl.get("description", ""))
+
+    def _validate_and_accept(self) -> None:
+        base_url = self._base_url_edit.text().strip()
+        if not base_url.startswith(("http://", "https://")):
+            QtWidgets.QMessageBox.warning(self, "Invalid URL", "Base URL must start with http:// or https://.")
+            return
+        if not self._name_edit.text().strip():
+            QtWidgets.QMessageBox.warning(self, "Missing Name", "Please enter a display name for this API.")
+            return
+        self.accept()
+
+    def build_endpoint(self) -> api_tools.CustomApiEndpoint:
+        return api_tools.CustomApiEndpoint(
+            id=self._id_edit.text().strip() or self._name_edit.text().strip(),
+            name=self._name_edit.text().strip(),
+            category=self._cat_combo.currentText(),
+            description=self._desc_edit.toPlainText().strip(),
+            base_url=self._base_url_edit.text().strip(),
+            default_path=self._path_edit.text().strip(),
+            method=self._method_combo.currentText(),
+            auth_type=self._auth_combo.currentText(),
+            auth_param=self._auth_param_edit.text().strip(),
+            env_secret_name=self._secret_name_edit.text().strip(),
+            confirmation_mode=self._confirm_combo.currentText(),
+            enabled=self._enabled_chk.isChecked(),
+        ).normalized()
+
+    def save_secret_if_entered(self, env_path: Optional[Path] = None) -> bool:
+        sec_name = self._secret_name_edit.text().strip()
+        sec_val = self._secret_val_edit.text().strip()
+        if sec_name and sec_val:
+            chatbot.save_env_key(sec_name, sec_val, env_path=env_path)
+            return True
+        return False
+
+
 class SettingsDialog(QtWidgets.QDialog):
     def __init__(self, config: CharacterConfig, parent: Optional[QtWidgets.QWidget] = None):
         super().__init__(parent)
         self.setWindowTitle("Customize Desktop Character")
-        self.setMinimumSize(540, 460)
+        self.setMinimumSize(640, 540)
         screen = QtGui.QGuiApplication.primaryScreen()
-        avail_h = screen.availableGeometry().height() if screen else 800
-        self.resize(580, min(680, max(480, avail_h - 80)))
-        self.setStyleSheet(
-            "QDialog{background:#0f172a;color:#e2e8f0;}"
-            "QScrollArea{background:transparent;border:none;}"
-            "QLabel,QCheckBox{color:#cbd5e1;font-weight:600;}"
-            "QLineEdit,QComboBox,QPlainTextEdit,QSpinBox{background:#1e293b;color:#f8fafc;"
-            "border:1px solid #334155;border-radius:7px;padding:6px;}"
-            "QPushButton{background:#1e293b;color:#e2e8f0;border:1px solid #334155;"
-            "border-radius:7px;padding:6px 12px;font-weight:600;}"
-            "QPushButton:hover{background:#334155;}"
-        )
+        avail = screen.availableGeometry() if screen else QtCore.QRect(0, 0, 1280, 800)
+        target_w = min(700, max(640, avail.width() - 80))
+        target_h = min(600, max(540, avail.height() - 60))
+        self.resize(target_w, target_h)
+        self.setStyleSheet(_DARK_DIALOG_QSS)
 
         self._config = CharacterConfig(**asdict(config))
         layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setContentsMargins(14, 12, 14, 12)
         layout.setSpacing(10)
 
-        scroll = QtWidgets.QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        form_host = QtWidgets.QWidget()
-        form_host.setStyleSheet("background:transparent;")
-        form = QtWidgets.QFormLayout(form_host)
-        form.setContentsMargins(4, 4, 10, 4)
-        form.setSpacing(9)
-        form.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        self._tabs = QtWidgets.QTabWidget()
+        self._tabs.addTab(self._build_character_tab(), "Character")
+        self._tabs.addTab(self._build_ai_keys_tab(), "AI && API Keys")
+        self._tabs.addTab(self._build_pc_files_tab(), "PC && Files")
+        self._tabs.addTab(self._build_apis_tab(), "APIs && Tools")
+        layout.addWidget(self._tabs, 1)
 
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Save | QtWidgets.QDialogButtonBox.StandardButton.Cancel
+        )
+        save_btn = buttons.button(QtWidgets.QDialogButtonBox.StandardButton.Save)
+        if save_btn is not None:
+            save_btn.setObjectName("primaryBtn")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    @staticmethod
+    def _create_form_card(title: str, vertical_spacing: int = 6) -> tuple[QtWidgets.QGroupBox, QtWidgets.QFormLayout]:
+        box = QtWidgets.QGroupBox(title)
+        form = QtWidgets.QFormLayout(box)
+        form.setContentsMargins(6, 4, 6, 4)
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(vertical_spacing)
+        form.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter)
+        form.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        return box, form
+
+    @staticmethod
+    def _add_option_with_hint(
+        parent_layout: QtWidgets.QVBoxLayout,
+        checkbox: QtWidgets.QCheckBox,
+        hint_text: str,
+    ) -> None:
+        parent_layout.addWidget(checkbox)
+        hint = QtWidgets.QLabel(hint_text)
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color:#94a3b8;font-size:11px;font-weight:400;margin-left:22px;margin-bottom:2px;")
+        parent_layout.addWidget(hint)
+
+    def _build_character_tab(self) -> QtWidgets.QWidget:
+        tab = QtWidgets.QWidget()
+        vbox = QtWidgets.QVBoxLayout(tab)
+        vbox.setContentsMargins(12, 10, 12, 10)
+        vbox.setSpacing(10)
+
+        persona_box, persona_form = self._create_form_card("Persona && Behavior")
         self._name_edit = QtWidgets.QLineEdit(self._config.character_name)
-        form.addRow("Character Name:", self._name_edit)
+        persona_form.addRow("Character Name:", self._name_edit)
 
         self._preset_combo = QtWidgets.QComboBox()
         self._preset_combo.addItem("-- Apply Persona Preset --")
         for key in PERSONA_PRESETS:
             self._preset_combo.addItem(key)
         self._preset_combo.currentTextChanged.connect(self._on_preset_selected)
-        form.addRow("Persona Preset:", self._preset_combo)
+        persona_form.addRow("Persona Preset:", self._preset_combo)
 
         self._persona_edit = QtWidgets.QPlainTextEdit(self._config.personality_prompt)
-        self._persona_edit.setFixedHeight(78)
-        form.addRow("Personality Prompt:", self._persona_edit)
+        self._persona_edit.setFixedHeight(96)
+        self._persona_edit.setLineWrapMode(QtWidgets.QPlainTextEdit.LineWrapMode.WidgetWidth)
+        persona_form.addRow("Personality Prompt:", self._persona_edit)
+        vbox.addWidget(persona_box)
 
+        look_box, look_form = self._create_form_card("Appearance && Startup")
         sprite_row = QtWidgets.QHBoxLayout()
+        sprite_row.setSpacing(6)
         self._sprite_edit = QtWidgets.QLineEdit(self._config.sprite_path)
         self._sprite_edit.setPlaceholderText("Leave empty for built-in cute animated pet")
         browse_btn = QtWidgets.QPushButton("Browse...")
@@ -1557,9 +1951,10 @@ class SettingsDialog(QtWidgets.QDialog):
         sprite_row.addWidget(self._sprite_edit, 1)
         sprite_row.addWidget(browse_btn)
         sprite_row.addWidget(reset_sprite_btn)
-        form.addRow("Custom Image / GIF:", sprite_row)
+        look_form.addRow("Custom Image / GIF:", sprite_row)
 
         size_row = QtWidgets.QHBoxLayout()
+        size_row.setSpacing(8)
         init_size = max(40, min(250, int(self._config.character_size)))
         self._size_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
         self._size_slider.setRange(40, 250)
@@ -1569,21 +1964,44 @@ class SettingsDialog(QtWidgets.QDialog):
         self._size_spin.setSingleStep(5)
         self._size_spin.setValue(init_size)
         self._size_spin.setSuffix(" px")
+        self._size_spin.setMinimumWidth(82)
         self._size_slider.valueChanged.connect(self._size_spin.setValue)
         self._size_spin.valueChanged.connect(self._size_slider.setValue)
         size_row.addWidget(self._size_slider, 1)
         size_row.addWidget(self._size_spin)
-        form.addRow("Character Size:", size_row)
+        look_form.addRow("Character Size:", size_row)
 
+        self._initial_startup = is_startup_enabled()
+        self._startup_chk = QtWidgets.QCheckBox("Launch automatically when Windows starts")
+        self._startup_chk.setChecked(self._initial_startup)
+        if sys.platform != "win32":
+            self._startup_chk.setEnabled(False)
+        look_form.addRow("", self._startup_chk)
+        vbox.addWidget(look_box)
+        vbox.addStretch(1)
+        return tab
+
+    def _build_ai_keys_tab(self) -> QtWidgets.QWidget:
+        tab = QtWidgets.QWidget()
+        vbox = QtWidgets.QVBoxLayout(tab)
+        vbox.setContentsMargins(12, 8, 12, 8)
+        vbox.setSpacing(8)
+
+        ai_box, ai_form = self._create_form_card("AI Provider && Model", vertical_spacing=6)
         self._provider_combo = QtWidgets.QComboBox()
         self._provider_combo.addItems(list(chatbot.PROVIDER_SPECS.keys()))
         self._provider_combo.setCurrentText(self._config.provider)
         self._provider_combo.currentTextChanged.connect(self._on_provider_changed)
-        form.addRow("AI Provider:", self._provider_combo)
+        ai_form.addRow("AI Provider:", self._provider_combo)
 
         model_row = QtWidgets.QHBoxLayout()
+        model_row.setSpacing(6)
         self._model_combo = QtWidgets.QComboBox()
         self._model_combo.setEditable(True)
+        self._model_combo.setSizeAdjustPolicy(
+            QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
+        self._model_combo.setMinimumContentsLength(18)
         initial_model = chatbot.normalize_model_for_provider(self._config.provider, self._config.model_name)
         self._populate_models(self._config.provider, selected_model=initial_model, query_live=False)
         refresh_models_btn = QtWidgets.QPushButton("Refresh")
@@ -1591,49 +2009,107 @@ class SettingsDialog(QtWidgets.QDialog):
         refresh_models_btn.clicked.connect(self._on_refresh_models)
         model_row.addWidget(self._model_combo, 1)
         model_row.addWidget(refresh_models_btn)
-        form.addRow("Model ID:", model_row)
+        ai_form.addRow("Model ID:", model_row)
 
         self._provider_hint_lbl = QtWidgets.QLabel()
         self._provider_hint_lbl.setWordWrap(True)
-        self._provider_hint_lbl.setStyleSheet("color:#94a3b8;font-size:11px;font-weight:400;")
-        form.addRow("", self._provider_hint_lbl)
+        self._provider_hint_lbl.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.MinimumExpanding,
+        )
+        self._provider_hint_lbl.setMinimumHeight(34)
+        self._provider_hint_lbl.setStyleSheet("color:#94a3b8;font-size:11px;font-weight:400;padding:2px 0;")
+        ai_form.addRow("", self._provider_hint_lbl)
         self._refresh_provider_hint(self._config.provider)
 
         self._thinking_combo = QtWidgets.QComboBox()
         self._thinking_combo.addItems(["LOW", "MEDIUM", "HIGH"])
         self._thinking_combo.setCurrentText(self._config.thinking_level)
-        form.addRow("Gemini Thinking:", self._thinking_combo)
+        ai_form.addRow("Gemini Thinking:", self._thinking_combo)
 
-        self._tools_chk = QtWidgets.QCheckBox("Enable real-time tools (Tavily Web Search, Gold Rate, News, Time)")
+        self._tools_chk = QtWidgets.QCheckBox("Enable Web && API Tools (Live Weather, Gold, News, Search, APIs)")
         self._tools_chk.setChecked(self._config.use_tools)
-        form.addRow("", self._tools_chk)
+        ai_form.addRow("", self._tools_chk)
+        vbox.addWidget(ai_box)
 
-        self._sys_tools_chk = QtWidgets.QCheckBox(
-            "Enable PC & File Control (search, folder sizes, create, copy/paste, Recycle Bin, open/close apps)"
+        keys_box, keys_form = self._create_form_card("API Keys (saved locally to .env)", vertical_spacing=5)
+        key_specs = (
+            ("_gemini_key_edit", "Gemini API Key:", chatbot.resolve_api_key("gemini"), "Paste GEMINI_API_KEY (saved to .env)"),
+            ("_groq_key_edit", "Groq API Key:", chatbot.resolve_api_key("groq"), "Paste GROQ_API_KEY (gsk_...) — free tier (console.groq.com)"),
+            ("_grok_key_edit", "Grok (xAI) Key:", chatbot.resolve_api_key("grok"), "Paste GROK_API_KEY / XAI_API_KEY (xai-..., console.x.ai)"),
+            ("_nvidia_key_edit", "NVIDIA API Key:", chatbot.resolve_api_key("nvidia"), "Paste NVIDIA_API_KEY (saved to .env)"),
+            ("_tavily_key_edit", "Tavily Search Key:", os.getenv("TAVILY_API_KEY"), "Paste TAVILY_API_KEY (tvly-...) for live web_search"),
         )
+        for attr_name, label, existing_val, empty_hint in key_specs:
+            edit = QtWidgets.QLineEdit()
+            edit.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password)
+            edit.setPlaceholderText("Configured (leave blank to keep)" if existing_val else empty_hint)
+            setattr(self, attr_name, edit)
+            keys_form.addRow(label, edit)
+        vbox.addWidget(keys_box)
+        vbox.addStretch(1)
+        return tab
+
+    def _build_pc_files_tab(self) -> QtWidgets.QWidget:
+        tab = QtWidgets.QWidget()
+        vbox = QtWidgets.QVBoxLayout(tab)
+        vbox.setContentsMargins(12, 10, 12, 10)
+        vbox.setSpacing(10)
+
+        perm_box = QtWidgets.QGroupBox("Permissions && Safety")
+        perm_layout = QtWidgets.QVBoxLayout(perm_box)
+        perm_layout.setContentsMargins(8, 6, 8, 6)
+        perm_layout.setSpacing(6)
+
+        self._sys_tools_chk = QtWidgets.QCheckBox("Enable PC && File Control Tools")
         self._sys_tools_chk.setChecked(self._config.enable_system_tools)
-        form.addRow("", self._sys_tools_chk)
-
-        self._confirm_launch_chk = QtWidgets.QCheckBox(
-            "Ask Allow/Deny confirmation before opening apps (Delete & Move always confirm)"
+        self._add_option_with_hint(
+            perm_layout,
+            self._sys_tools_chk,
+            "Search files, check folder sizes, read/create/copy/move items, inspect Recycle Bin, "
+            "clipboard actions, and open or close running apps.",
         )
+
+        self._confirm_launch_chk = QtWidgets.QCheckBox("Ask Allow/Deny confirmation before opening apps")
         self._confirm_launch_chk.setChecked(self._config.confirm_app_launch)
-        form.addRow("", self._confirm_launch_chk)
-
-        self._all_folders_chk = QtWidgets.QCheckBox(
-            "Control All Drives (C:\\, D:\\, K:\\, etc. — disables whitelist; OS & .env/.git stay protected)"
+        self._add_option_with_hint(
+            perm_layout,
+            self._confirm_launch_chk,
+            "Recycle Bin deletes, moves/renames, overwrites, and closing running apps always ask Allow / Deny.",
         )
-        self._all_folders_chk.setChecked(self._config.allow_all_user_folders)
-        form.addRow("", self._all_folders_chk)
 
-        folders_row = QtWidgets.QHBoxLayout()
+        self._all_folders_chk = QtWidgets.QCheckBox("Control All Drives (Full PC Access)")
+        self._all_folders_chk.setChecked(self._config.allow_all_user_folders)
+        self._add_option_with_hint(
+            perm_layout,
+            self._all_folders_chk,
+            "Access C:\\, D:\\, K:\\, etc. beyond Allowed Folders. Windows OS dirs, protected apps, "
+            "and .env / .git folders stay blocked.",
+        )
+        vbox.addWidget(perm_box)
+
+        folders_box = QtWidgets.QGroupBox("Allowed Folders Whitelist")
+        folders_layout = QtWidgets.QVBoxLayout(folders_box)
+        folders_layout.setContentsMargins(8, 6, 8, 6)
+        folders_layout.setSpacing(6)
+
+        folders_hint = QtWidgets.QLabel(
+            "Active when Control All Drives is unchecked (one folder path or drive root per line):"
+        )
+        folders_hint.setWordWrap(True)
+        folders_hint.setStyleSheet("color:#94a3b8;font-size:11px;font-weight:400;")
+        folders_layout.addWidget(folders_hint)
+
         self._allowed_dirs_edit = QtWidgets.QPlainTextEdit(
             "\n".join(self._config.allowed_folders or system_tools.default_allowed_dir_strings())
         )
-        self._allowed_dirs_edit.setFixedHeight(62)
+        self._allowed_dirs_edit.setMinimumHeight(104)
+        self._allowed_dirs_edit.setLineWrapMode(QtWidgets.QPlainTextEdit.LineWrapMode.WidgetWidth)
         self._allowed_dirs_edit.setPlaceholderText("One allowed folder or drive root per line")
-        folder_btns = QtWidgets.QVBoxLayout()
-        folder_btns.setSpacing(4)
+        folders_layout.addWidget(self._allowed_dirs_edit, 1)
+
+        folder_btns = QtWidgets.QHBoxLayout()
+        folder_btns.setSpacing(8)
         add_dir_btn = QtWidgets.QPushButton("Add Folder...")
         add_dir_btn.clicked.connect(self._browse_allowed_folder)
         add_drives_btn = QtWidgets.QPushButton("Add All Drives")
@@ -1641,71 +2117,177 @@ class SettingsDialog(QtWidgets.QDialog):
         add_drives_btn.clicked.connect(self._add_all_drives)
         folder_btns.addWidget(add_dir_btn)
         folder_btns.addWidget(add_drives_btn)
-        folders_row.addWidget(self._allowed_dirs_edit, 1)
-        folders_row.addLayout(folder_btns)
-        form.addRow("Allowed Folders:", folders_row)
+        folder_btns.addStretch(1)
+        folders_layout.addLayout(folder_btns)
+        vbox.addWidget(folders_box, 1)
+        return tab
 
-        self._gemini_key_edit = QtWidgets.QLineEdit()
-        self._gemini_key_edit.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password)
-        self._gemini_key_edit.setPlaceholderText(
-            "Configured (leave blank to keep)"
-            if chatbot.resolve_api_key("gemini")
-            else "Paste GEMINI_API_KEY (saved to .env)"
+    def _sync_tools_checkboxes(self, source: QtWidgets.QCheckBox, checked: bool) -> None:
+        other = self._apis_tools_chk if source is self._tools_chk else self._tools_chk
+        if other.isChecked() != checked:
+            other.blockSignals(True)
+            other.setChecked(checked)
+            other.blockSignals(False)
+
+    def _build_apis_tab(self) -> QtWidgets.QWidget:
+        tab = QtWidgets.QWidget()
+        vbox = QtWidgets.QVBoxLayout(tab)
+        vbox.setContentsMargins(12, 10, 12, 10)
+        vbox.setSpacing(10)
+
+        self._apis_tools_chk = QtWidgets.QCheckBox(
+            "Enable Web && API Tools (Weather, Search, Gold, News, Maps, DB, Custom APIs)"
         )
-        form.addRow("Gemini API Key:", self._gemini_key_edit)
+        self._apis_tools_chk.setChecked(self._tools_chk.isChecked())
+        self._tools_chk.toggled.connect(lambda c: self._sync_tools_checkboxes(self._tools_chk, c))
+        self._apis_tools_chk.toggled.connect(lambda c: self._sync_tools_checkboxes(self._apis_tools_chk, c))
+        vbox.addWidget(self._apis_tools_chk)
 
-        self._groq_key_edit = QtWidgets.QLineEdit()
-        self._groq_key_edit.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password)
-        self._groq_key_edit.setPlaceholderText(
-            "Configured (leave blank to keep)"
-            if chatbot.resolve_api_key("groq")
-            else "Paste GROQ_API_KEY (gsk_...) — free tier (console.groq.com)"
+        custom_box = QtWidgets.QGroupBox("Custom && Company Internal APIs (custom_apis.json)")
+        custom_layout = QtWidgets.QVBoxLayout(custom_box)
+        custom_layout.setContentsMargins(8, 6, 8, 6)
+        custom_layout.setSpacing(6)
+
+        custom_hint = QtWidgets.QLabel(
+            "Register any internal company endpoint, webhook, or third-party REST API. "
+            "Read-only GET calls run automatically; POST/PUT/DELETE ask Allow / Deny."
         )
-        form.addRow("Groq API Key:", self._groq_key_edit)
+        custom_hint.setWordWrap(True)
+        custom_hint.setStyleSheet("color:#94a3b8;font-size:11px;font-weight:400;")
+        custom_layout.addWidget(custom_hint)
 
-        self._grok_key_edit = QtWidgets.QLineEdit()
-        self._grok_key_edit.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password)
-        self._grok_key_edit.setPlaceholderText(
-            "Configured (leave blank to keep)"
-            if chatbot.resolve_api_key("grok")
-            else "Paste GROK_API_KEY / XAI_API_KEY (xai-..., console.x.ai)"
+        self._custom_apis_list = QtWidgets.QListWidget()
+        self._custom_apis_list.setMinimumHeight(145)
+        self._custom_apis_list.itemDoubleClicked.connect(lambda _item: self._edit_custom_api())
+        custom_layout.addWidget(self._custom_apis_list, 1)
+
+        api_btns = QtWidgets.QHBoxLayout()
+        api_btns.setSpacing(6)
+        add_btn = QtWidgets.QPushButton("Add Custom API...")
+        add_btn.clicked.connect(self._add_custom_api)
+        edit_btn = QtWidgets.QPushButton("Edit...")
+        edit_btn.clicked.connect(self._edit_custom_api)
+        del_btn = QtWidgets.QPushButton("Remove")
+        del_btn.clicked.connect(self._delete_custom_api)
+        test_btn = QtWidgets.QPushButton("Test Call")
+        test_btn.clicked.connect(self._test_custom_api)
+        api_btns.addWidget(add_btn)
+        api_btns.addWidget(edit_btn)
+        api_btns.addWidget(del_btn)
+        api_btns.addWidget(test_btn)
+        api_btns.addStretch(1)
+        custom_layout.addLayout(api_btns)
+        vbox.addWidget(custom_box, 1)
+
+        builtin_box = QtWidgets.QGroupBox("Built-in Service Connectors")
+        builtin_layout = QtWidgets.QVBoxLayout(builtin_box)
+        builtin_layout.setContentsMargins(8, 6, 8, 6)
+        builtin_layout.setSpacing(6)
+
+        free_lbl = QtWidgets.QLabel(
+            "Work free with zero keys: Live Weather (Open-Meteo), Web Search fallback (DuckDuckGo), "
+            "Latest News (RSS), Places/Geocode (OpenStreetMap), and local SQLite."
         )
-        form.addRow("Grok (xAI) Key:", self._grok_key_edit)
+        free_lbl.setWordWrap(True)
+        free_lbl.setStyleSheet("color:#94a3b8;font-size:11px;font-weight:400;")
+        builtin_layout.addWidget(free_lbl)
 
-        self._nvidia_key_edit = QtWidgets.QLineEdit()
-        self._nvidia_key_edit.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password)
-        self._nvidia_key_edit.setPlaceholderText(
-            "Configured (leave blank to keep)"
-            if chatbot.resolve_api_key("nvidia")
-            else "Paste NVIDIA_API_KEY (saved to .env)"
-        )
-        form.addRow("NVIDIA API Key:", self._nvidia_key_edit)
+        self._builtin_status_lbl = QtWidgets.QLabel()
+        self._builtin_status_lbl.setWordWrap(True)
+        self._builtin_status_lbl.setStyleSheet("color:#cbd5e1;font-size:11px;font-weight:600;")
+        builtin_layout.addWidget(self._builtin_status_lbl)
 
-        self._tavily_key_edit = QtWidgets.QLineEdit()
-        self._tavily_key_edit.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password)
-        self._tavily_key_edit.setPlaceholderText(
-            "Configured (leave blank to keep)"
-            if os.getenv("TAVILY_API_KEY")
-            else "Paste TAVILY_API_KEY (tvly-...) for live web_search (app.tavily.com)"
-        )
-        form.addRow("Tavily Search Key:", self._tavily_key_edit)
+        cred_row = QtWidgets.QHBoxLayout()
+        cred_btn = QtWidgets.QPushButton("Configure API Credentials (Maps, DB, Email, Calendar, Payments)...")
+        cred_btn.clicked.connect(self._open_builtin_credentials)
+        cred_row.addWidget(cred_btn)
+        cred_row.addStretch(1)
+        builtin_layout.addLayout(cred_row)
+        vbox.addWidget(builtin_box)
 
-        self._initial_startup = is_startup_enabled()
-        self._startup_chk = QtWidgets.QCheckBox("Launch automatically when Windows starts")
-        self._startup_chk.setChecked(self._initial_startup)
-        if sys.platform != "win32":
-            self._startup_chk.setEnabled(False)
-        form.addRow("", self._startup_chk)
+        self._refresh_custom_apis_list()
+        self._refresh_builtin_status()
+        return tab
 
-        scroll.setWidget(form_host)
-        layout.addWidget(scroll, 1)
+    def _refresh_custom_apis_list(self) -> None:
+        self._custom_apis_list.clear()
+        for ep in api_tools.load_custom_apis():
+            tag = "ON" if ep.enabled else "OFF"
+            text = f"[{tag}] {ep.name} ({ep.category}) — {ep.method} {ep.base_url}{ep.default_path}"
+            item = QtWidgets.QListWidgetItem(text)
+            item.setData(QtCore.Qt.ItemDataRole.UserRole, ep.id)
+            self._custom_apis_list.addItem(item)
 
-        buttons = QtWidgets.QDialogButtonBox(
-            QtWidgets.QDialogButtonBox.StandardButton.Save | QtWidgets.QDialogButtonBox.StandardButton.Cancel
-        )
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
+    def _refresh_builtin_status(self) -> None:
+        checks = [
+            ("OpenWeather", bool(os.getenv("OPENWEATHER_API_KEY"))),
+            ("NewsAPI", bool(os.getenv("NEWSAPI_KEY"))),
+            ("Google Maps", bool(os.getenv("GOOGLE_MAPS_API_KEY"))),
+            ("Database", bool(os.getenv("SQLITE_DB_PATH") or os.getenv("DATABASE_API_URL"))),
+            ("Email", bool(os.getenv("EMAIL_USER") and os.getenv("EMAIL_PASSWORD"))),
+            ("Calendar", bool(os.getenv("GOOGLE_CALENDAR_TOKEN") or os.getenv("CALENDAR_ICS_URL") or os.getenv("CALENDAR_ICS_PATH"))),
+            ("Payments", bool(os.getenv("STRIPE_API_KEY") or (os.getenv("RAZORPAY_KEY_ID") and os.getenv("RAZORPAY_KEY_SECRET")))),
+        ]
+        summary = " · ".join(f"{name}: {'Configured' if ok else 'Not set'}" for name, ok in checks)
+        self._builtin_status_lbl.setText(f"Optional/Pro Keys: {summary}")
+
+    def _selected_custom_api(self) -> Optional[api_tools.CustomApiEndpoint]:
+        item = self._custom_apis_list.currentItem()
+        if item is None:
+            return None
+        api_id = str(item.data(QtCore.Qt.ItemDataRole.UserRole) or "")
+        for ep in api_tools.load_custom_apis():
+            if ep.id == api_id:
+                return ep
+        return None
+
+    def _add_custom_api(self) -> None:
+        dlg = CustomApiEditorDialog(parent=self)
+        if dlg.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+            api_tools.upsert_custom_api(dlg.build_endpoint())
+            dlg.save_secret_if_entered()
+            self._refresh_custom_apis_list()
+
+    def _edit_custom_api(self) -> None:
+        ep = self._selected_custom_api()
+        if ep is None:
+            return
+        dlg = CustomApiEditorDialog(endpoint=ep, parent=self)
+        if dlg.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+            api_tools.upsert_custom_api(dlg.build_endpoint())
+            dlg.save_secret_if_entered()
+            self._refresh_custom_apis_list()
+
+    def _delete_custom_api(self) -> None:
+        ep = self._selected_custom_api()
+        if ep is None:
+            return
+        api_tools.delete_custom_api(ep.id)
+        self._refresh_custom_apis_list()
+
+    def _test_custom_api(self) -> None:
+        ep = self._selected_custom_api()
+        if ep is None:
+            return
+
+        def _confirm_test(title: str, detail: str, _risk: str) -> bool:
+            res = QtWidgets.QMessageBox.question(
+                self,
+                title,
+                detail,
+                QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+            )
+            return res == QtWidgets.QMessageBox.StandardButton.Yes
+
+        policy = api_tools.ApiToolsPolicy(confirm_callback=_confirm_test)
+        out = api_tools.call_custom_api(ep.id, policy=policy)
+        QtWidgets.QMessageBox.information(self, f"Test Result: {ep.name}", out[:1200])
+
+    def _open_builtin_credentials(self) -> None:
+        dlg = BuiltInApisDialog(parent=self)
+        if dlg.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+            dlg.save_to_env()
+            self._refresh_builtin_status()
 
     def _on_preset_selected(self, label: str) -> None:
         if label in PERSONA_PRESETS:
@@ -1896,6 +2478,7 @@ class DesktopCompanionApp(QtCore.QObject):
                 use_tools=config.use_tools,
                 enable_system_tools=bool(config.enable_system_tools),
                 system_policy=self._build_system_policy(config),
+                api_policy=self._build_api_policy(config),
                 system_prompt=build_effective_system_prompt(
                     config.character_name,
                     config.personality_prompt,
@@ -1933,6 +2516,7 @@ class DesktopCompanionApp(QtCore.QObject):
         self.popup.provider_switch_requested.connect(
             lambda p, m: self.switch_provider(p, m or None)
         )
+        self.popup.enable_web_tools_requested.connect(lambda: self.toggle_web_tools(True))
 
         # Single-instance listener
         self._instance_guard: Optional[SingleInstanceGuard] = None
@@ -2060,21 +2644,35 @@ class DesktopCompanionApp(QtCore.QObject):
         else:
             self.toggle_popup()
 
-    def _build_system_policy(self, cfg: CharacterConfig) -> system_tools.SystemToolsPolicy:
+    def _resolved_allowed_roots(self, cfg: CharacterConfig) -> List[Path]:
         roots = [
             Path(p).expanduser()
             for p in (cfg.allowed_folders or [])
             if str(p).strip()
         ]
-        if not roots:
-            roots = system_tools.default_allowed_dirs()
-        # Use weakref proxies so ChatbotConfig -> SystemToolsPolicy never keeps a
-        # strong reference cycle back to DesktopCompanionApp (QObject).
+        return roots or system_tools.default_allowed_dirs()
+
+    def _confirm_proxy_fn(self) -> Any:
         weak_self = weakref.ref(self)
 
         def _confirm_proxy(title: str, detail: str, risk: str) -> bool:
             owner = weak_self()
             return owner._confirm_on_ui(title, detail, risk) if owner is not None else False
+
+        return _confirm_proxy
+
+    def _build_api_policy(self, cfg: CharacterConfig) -> api_tools.ApiToolsPolicy:
+        return api_tools.ApiToolsPolicy(
+            confirm_callback=self._confirm_proxy_fn(),
+            allowed_roots=self._resolved_allowed_roots(cfg),
+            allow_all_non_system=bool(cfg.allow_all_user_folders),
+        )
+
+    def _build_system_policy(self, cfg: CharacterConfig) -> system_tools.SystemToolsPolicy:
+        roots = self._resolved_allowed_roots(cfg)
+        # Use weakref proxies so ChatbotConfig -> policy never keeps a
+        # strong reference cycle back to DesktopCompanionApp (QObject).
+        weak_self = weakref.ref(self)
 
         def _clipboard_proxy(action: str, text: str, paths: List[str]) -> str:
             owner = weak_self()
@@ -2090,7 +2688,7 @@ class DesktopCompanionApp(QtCore.QObject):
             allow_all_non_system=bool(cfg.allow_all_user_folders),
             confirm_destructive=True,
             confirm_app_launch=bool(cfg.confirm_app_launch),
-            confirm_callback=_confirm_proxy,
+            confirm_callback=self._confirm_proxy_fn(),
             clipboard_callback=_clipboard_proxy,
         )
 
@@ -2227,6 +2825,12 @@ class DesktopCompanionApp(QtCore.QObject):
             )
         return f"Error: Unsupported clipboard action '{action}'."
 
+    def toggle_web_tools(self, enabled: bool) -> None:
+        self._config.use_tools = bool(enabled)
+        self._apply_updated_config(self._config)
+        state = "enabled" if self._config.use_tools else "disabled"
+        self.character.show_speech_bubble(f"Web & API Tools {state}!")
+
     def toggle_system_tools(self, enabled: bool) -> None:
         self._config.enable_system_tools = bool(enabled)
         self._apply_updated_config(self._config)
@@ -2259,6 +2863,7 @@ class DesktopCompanionApp(QtCore.QObject):
                 use_tools=new_cfg.use_tools,
                 enable_system_tools=bool(new_cfg.enable_system_tools),
                 system_policy=self._build_system_policy(new_cfg),
+                api_policy=self._build_api_policy(new_cfg),
                 system_prompt=build_effective_system_prompt(
                     new_cfg.character_name,
                     new_cfg.personality_prompt,
@@ -2363,6 +2968,7 @@ class DesktopCompanionApp(QtCore.QObject):
     def _on_worker_tool_start(self, name: str, args_txt: str) -> None:
         self.character.set_state("thinking")
         self.popup.set_status(f"Running tool: {name}...")
+        self.popup.reset_streaming_preview(f"<i>Checking {html.escape(name)}...</i>")
         self.character.show_speech_bubble(f"Checking {name}...")
 
     def _on_worker_tool_end(self, name: str, result: str) -> None:
