@@ -11,6 +11,16 @@ Built-in real-time tools:
 - `get_news`: Google News RSS headline search
 - `get_current_datetime`: Current local and UTC date/time
 
+Optional Desktop **PC & File Control** tools ([system_tools.py](system_tools.py)) — toggle via right-click -> **PC & File Control Tools** or **Control All Drives (Full PC)**:
+- `list_drives`: Discover mounted PC drives (`C:\`, `D:\`, `K:\`, USB/network) with free/total disk space
+- `search_files`: Search files and folders across all drives or Allowed Folders (`Desktop`, `Documents`, `Downloads`, project folder, `K:\`, etc.)
+- `list_directory`, `get_folder_size`, `list_recycle_bin`, & `read_text_file`: Browse drives/folders, calculate recursive folder storage totals, inspect Windows Recycle Bin filenames (read-only), and read text/code files
+- `create_item` & `copy_or_move`: Create folders/files and copy, move (cut/paste), or rename items
+- `delete_item`: Safely moves files/folders to the **Windows Recycle Bin** (never permanent blind unlink)
+- `clipboard_action`: Read clipboard text (`get`), copy text (`set`), or place files on the Windows clipboard (`copy_files`) for `Ctrl+V` paste
+- `launch_app_or_file`, `list_running_apps`, & `close_app`: Open installed Windows apps, inspect running non-system apps/windows, or close running apps (e.g. Spyder, Notepad, Chrome)
+- **Safety guardrails**: Interactive **Allow / Deny** dialog before Recycle Bin deletion, move/rename, overwrite, launching apps/executables, or closing running apps; `.env`, `.git/`, `$Recycle.Bin`, Windows system directories, and critical OS processes stay blocked, and browser `--web` sessions never expose local PC tools.
+
 ---
 
 ## Quick Setup (Windows)

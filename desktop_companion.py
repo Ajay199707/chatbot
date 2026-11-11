@@ -36,10 +36,12 @@ import subprocess
 import sys
 import threading
 from typing import Any, Dict, List, Optional
+import weakref
 
 from PySide6 import QtCore, QtGui, QtNetwork, QtWidgets
 
 import chatbot
+import system_tools
 
 
 def _resolve_config_file() -> Path:
@@ -94,6 +96,10 @@ class CharacterConfig:
     thinking_level: str = "MEDIUM"
     temperature: float = 0.7
     use_tools: bool = True
+    enable_system_tools: bool = False
+    confirm_app_launch: bool = True
+    allow_all_user_folders: bool = True
+    allowed_folders: List[str] = field(default_factory=system_tools.default_allowed_dir_strings)
     hotkey_enabled: bool = True
     window_pos: Optional[List[int]] = None
 
@@ -119,7 +125,13 @@ class CharacterConfig:
             pass
 
 
-def build_effective_system_prompt(name: str, personality: str, use_tools: bool) -> str:
+def build_effective_system_prompt(
+    name: str,
+    personality: str,
+    use_tools: bool,
+    enable_system_tools: bool = False,
+    allow_all_drives: bool = False,
+) -> str:
     clean_name = (name or "Lumi").strip() or "Lumi"
     clean_persona = (personality or PERSONA_PRESETS["Cute Desktop Pet"]).strip()
     parts = [f"Your name is {clean_name}.", clean_persona]
@@ -128,6 +140,19 @@ def build_effective_system_prompt(name: str, personality: str, use_tools: bool) 
             "When the user asks about live web information, gold/silver prices in India, latest news, "
             "or the current date/time, call your available tools first and cite the real-time result honestly."
         )
+    if enable_system_tools:
+        parts.append(
+            "You also have PC & File Control tools (search_files, list_drives, list_directory, get_folder_size, "
+            "list_recycle_bin, read_text_file, create_item, copy_or_move, delete_item, clipboard_action, "
+            "launch_app_or_file, list_running_apps, close_app). "
+            "Use get_folder_size for storage or folder size questions, search or list paths first before moving or "
+            "deleting, use list_running_apps/close_app when asked to close an app, never guess paths, and respect user confirmations."
+        )
+        if allow_all_drives:
+            parts.append(
+                "All-Drive Control is ON across all mounted drives (C:\\, D:\\, K:\\, etc., excluding protected OS "
+                "and .env/.git folders). Call list_drives to discover drives or list_directory with paths like 'K:\\'."
+            )
     return " ".join(parts)
 
 
@@ -168,8 +193,9 @@ def markdown_to_qt_html(md_text: str) -> str:
     out: List[str] = []
     i = 0
     while i < len(lines):
+        start_i = i
         line = lines[i]
-        fence = re.match(r"^```([\w.+-]*)\s*$", line)
+        fence = re.match(r"^```(.*)$", line)
         if fence:
             code_lines: List[str] = []
             i += 1
@@ -189,11 +215,12 @@ def markdown_to_qt_html(md_text: str) -> str:
             i += 1
             continue
 
-        h = re.match(r"^(#{1,3})\s+(.+)$", line)
+        h = re.match(r"^(#{1,3})\s+(.*)$", line)
         if h:
             lvl = len(h.group(1))
             size = {1: "16px", 2: "14px", 3: "13px"}[lvl]
-            out.append(f"<p style='font-size:{size};font-weight:700;margin:6px 0 3px;'>{_format_inline_md(h.group(2))}</p>")
+            content_html = _format_inline_md(h.group(2).strip()) or "&nbsp;"
+            out.append(f"<p style='font-size:{size};font-weight:700;margin:6px 0 3px;'>{content_html}</p>")
             i += 1
             continue
 
@@ -224,7 +251,11 @@ def markdown_to_qt_html(md_text: str) -> str:
         ):
             para.append(_format_inline_md(lines[i]))
             i += 1
-        out.append("<p style='margin:0 0 6px;'>" + "<br/>".join(para) + "</p>")
+        if para:
+            out.append("<p style='margin:0 0 6px;'>" + "<br/>".join(para) + "</p>")
+        if i == start_i:
+            out.append(f"<p style='margin:0 0 6px;'>{_format_inline_md(lines[i])}</p>")
+            i += 1
 
     return "".join(out) or "<i>...</i>"
 
@@ -657,6 +688,8 @@ class CharacterWidget(QtWidgets.QWidget):
     open_settings_requested = QtCore.Signal()
     clear_chat_requested = QtCore.Signal()
     provider_change_requested = QtCore.Signal(str)
+    system_tools_toggled = QtCore.Signal(bool)
+    all_drives_toggled = QtCore.Signal(bool)
     reset_pos_requested = QtCore.Signal()
     hide_requested = QtCore.Signal()
     quit_requested = QtCore.Signal()
@@ -933,6 +966,12 @@ class CharacterWidget(QtWidgets.QWidget):
             sa.triggered.connect(lambda _=False, s=preset_sz: self.size_change_requested.emit(s))
 
         act_clear_chat = menu.addAction("Clear Conversation")
+        act_sys_tools = menu.addAction("PC & File Control Tools")
+        act_sys_tools.setCheckable(True)
+        act_sys_tools.setChecked(self._config.enable_system_tools)
+        act_all_drives = menu.addAction("Control All Drives (Full PC)")
+        act_all_drives.setCheckable(True)
+        act_all_drives.setChecked(self._config.allow_all_user_folders)
         menu.addSeparator()
 
         prov_menu = menu.addMenu("Switch Provider")
@@ -956,6 +995,10 @@ class CharacterWidget(QtWidgets.QWidget):
             self._browse_sprite()
         elif chosen == act_clear_chat:
             self.clear_chat_requested.emit()
+        elif chosen == act_sys_tools:
+            self.system_tools_toggled.emit(act_sys_tools.isChecked())
+        elif chosen == act_all_drives:
+            self.all_drives_toggled.emit(act_all_drives.isChecked())
         elif chosen == act_reset:
             self.reset_pos_requested.emit()
         elif chosen == act_hide:
@@ -1212,14 +1255,21 @@ class ChatPopupWindow(QtWidgets.QWidget):
         self._scroll_timer.setInterval(10)
         self._scroll_timer.timeout.connect(self._do_scroll_to_bottom)
 
+        self._render_timer = QtCore.QTimer(self)
+        self._render_timer.setSingleShot(True)
+        self._render_timer.setInterval(40)
+        self._render_timer.timeout.connect(self._flush_streaming_markdown)
+
         # Quick suggestion chips
         chips_row = QtWidgets.QHBoxLayout()
         chips_row.setSpacing(6)
+        self._files_chip: Optional[QtWidgets.QPushButton] = None
         for label, prompt in [
             ("Web Search", "Search the web for the latest tech breakthroughs today."),
             ("Gold Rate", "What is today's gold rate in India?"),
             ("Latest News", "What is the latest tech news?"),
             ("Time", "What date and time is it?"),
+            ("Files", "List all my PC drives and allowed folders."),
         ]:
             btn = QtWidgets.QPushButton(label)
             btn.setStyleSheet(
@@ -1229,6 +1279,9 @@ class ChatPopupWindow(QtWidgets.QWidget):
             )
             btn.clicked.connect(lambda _=False, p=prompt: self._submit_text(p))
             chips_row.addWidget(btn)
+            if label == "Files":
+                btn.setVisible(bool(self._config.enable_system_tools))
+                self._files_chip = btn
         chips_row.addStretch(1)
         root.addLayout(chips_row)
 
@@ -1270,7 +1323,15 @@ class ChatPopupWindow(QtWidgets.QWidget):
         self._config = config
         self._name_lbl.setText(config.character_name or "Lumi")
         model = config.model_name or chatbot.default_model_for_provider(config.provider)
-        self._status_lbl.setText(f"{config.provider} · {model}")
+        if config.enable_system_tools and config.allow_all_user_folders:
+            pc_badge = " · PC Control ON · All Drives"
+        elif config.enable_system_tools:
+            pc_badge = " · PC Control ON"
+        else:
+            pc_badge = ""
+        self._status_lbl.setText(f"{config.provider} · {model}{pc_badge}")
+        if self._files_chip is not None:
+            self._files_chip.setVisible(bool(config.enable_system_tools))
         self._avatar_lbl.setPixmap(draw_pet_pixmap(34, config.sprite_path))
         needs_key = chatbot.requires_api_key(config.provider) and not chatbot.resolve_api_key(config.provider)
         if needs_key:
@@ -1294,6 +1355,7 @@ class ChatPopupWindow(QtWidgets.QWidget):
         self._input.setFocus()
 
     def clear_messages(self) -> None:
+        self._render_timer.stop()
         while self._msg_layout.count() > 1:
             item = self._msg_layout.takeAt(0)
             w = item.widget()
@@ -1347,16 +1409,25 @@ class ChatPopupWindow(QtWidgets.QWidget):
         self._insert_widget(browser)
         self._sync_browser_height(browser)
 
-    def append_assistant_token(self, token: str) -> None:
+    def _flush_streaming_markdown(self) -> None:
         if self._streaming_bubble is None:
-            self.start_assistant_message()
-        self._streaming_text += token
-        assert self._streaming_bubble is not None
+            return
         self._streaming_bubble.setHtml(markdown_to_qt_html(self._streaming_text))
         self._sync_browser_height(self._streaming_bubble)
         self._scroll_to_bottom()
 
+    def append_assistant_token(self, token: str) -> None:
+        was_empty = not self._streaming_text
+        if self._streaming_bubble is None:
+            self.start_assistant_message()
+        self._streaming_text += token
+        if was_empty:
+            self._flush_streaming_markdown()
+        elif not self._render_timer.isActive():
+            self._render_timer.start()
+
     def finish_assistant_message(self, final_text: str) -> None:
+        self._render_timer.stop()
         if self._streaming_bubble is not None and final_text:
             self._streaming_bubble.setHtml(markdown_to_qt_html(final_text))
             self._sync_browser_height(self._streaming_bubble)
@@ -1364,6 +1435,7 @@ class ChatPopupWindow(QtWidgets.QWidget):
         self._scroll_to_bottom()
 
     def show_error(self, message: str) -> None:
+        self._render_timer.stop()
         if self._streaming_bubble is not None:
             self._streaming_bubble.setHtml(
                 f"<span style='color:#fca5a5;'><b>Error:</b> {html.escape(message)}</span>"
@@ -1536,6 +1608,43 @@ class SettingsDialog(QtWidgets.QDialog):
         self._tools_chk.setChecked(self._config.use_tools)
         form.addRow("", self._tools_chk)
 
+        self._sys_tools_chk = QtWidgets.QCheckBox(
+            "Enable PC & File Control (search, folder sizes, create, copy/paste, Recycle Bin, open/close apps)"
+        )
+        self._sys_tools_chk.setChecked(self._config.enable_system_tools)
+        form.addRow("", self._sys_tools_chk)
+
+        self._confirm_launch_chk = QtWidgets.QCheckBox(
+            "Ask Allow/Deny confirmation before opening apps (Delete & Move always confirm)"
+        )
+        self._confirm_launch_chk.setChecked(self._config.confirm_app_launch)
+        form.addRow("", self._confirm_launch_chk)
+
+        self._all_folders_chk = QtWidgets.QCheckBox(
+            "Control All Drives (C:\\, D:\\, K:\\, etc. — disables whitelist; OS & .env/.git stay protected)"
+        )
+        self._all_folders_chk.setChecked(self._config.allow_all_user_folders)
+        form.addRow("", self._all_folders_chk)
+
+        folders_row = QtWidgets.QHBoxLayout()
+        self._allowed_dirs_edit = QtWidgets.QPlainTextEdit(
+            "\n".join(self._config.allowed_folders or system_tools.default_allowed_dir_strings())
+        )
+        self._allowed_dirs_edit.setFixedHeight(62)
+        self._allowed_dirs_edit.setPlaceholderText("One allowed folder or drive root per line")
+        folder_btns = QtWidgets.QVBoxLayout()
+        folder_btns.setSpacing(4)
+        add_dir_btn = QtWidgets.QPushButton("Add Folder...")
+        add_dir_btn.clicked.connect(self._browse_allowed_folder)
+        add_drives_btn = QtWidgets.QPushButton("Add All Drives")
+        add_drives_btn.setToolTip("Add every ready drive root (C:\\, D:\\, K:\\, etc.) to Allowed Folders")
+        add_drives_btn.clicked.connect(self._add_all_drives)
+        folder_btns.addWidget(add_dir_btn)
+        folder_btns.addWidget(add_drives_btn)
+        folders_row.addWidget(self._allowed_dirs_edit, 1)
+        folders_row.addLayout(folder_btns)
+        form.addRow("Allowed Folders:", folders_row)
+
         self._gemini_key_edit = QtWidgets.QLineEdit()
         self._gemini_key_edit.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password)
         self._gemini_key_edit.setPlaceholderText(
@@ -1680,6 +1789,33 @@ class SettingsDialog(QtWidgets.QDialog):
         if path:
             self._sprite_edit.setText(path)
 
+    def _browse_allowed_folder(self) -> None:
+        folder = QtWidgets.QFileDialog.getExistingDirectory(self, "Select Allowed Folder")
+        if folder:
+            existing = [
+                ln.strip()
+                for ln in self._allowed_dirs_edit.toPlainText().splitlines()
+                if ln.strip()
+            ]
+            if folder not in existing:
+                existing.append(folder)
+            self._allowed_dirs_edit.setPlainText("\n".join(existing))
+
+    def _add_all_drives(self) -> None:
+        existing = [
+            ln.strip()
+            for ln in self._allowed_dirs_edit.toPlainText().splitlines()
+            if ln.strip()
+        ]
+        seen = {p.lower() for p in existing}
+        for info in system_tools.get_available_drives():
+            if info.get("ready", True) and info.get("root"):
+                root_str = str(info["root"])
+                if root_str.lower() not in seen:
+                    seen.add(root_str.lower())
+                    existing.append(root_str)
+        self._allowed_dirs_edit.setPlainText("\n".join(existing))
+
     def updated_config(self) -> CharacterConfig:
         self._config.character_name = self._name_edit.text().strip() or "Lumi"
         self._config.personality_prompt = (
@@ -1694,6 +1830,14 @@ class SettingsDialog(QtWidgets.QDialog):
         )
         self._config.thinking_level = self._thinking_combo.currentText()
         self._config.use_tools = self._tools_chk.isChecked()
+        self._config.enable_system_tools = self._sys_tools_chk.isChecked()
+        self._config.confirm_app_launch = self._confirm_launch_chk.isChecked()
+        self._config.allow_all_user_folders = self._all_folders_chk.isChecked()
+        self._config.allowed_folders = [
+            ln.strip()
+            for ln in self._allowed_dirs_edit.toPlainText().splitlines()
+            if ln.strip()
+        ] or system_tools.default_allowed_dir_strings()
         return self._config
 
     def apply_system_changes(self, env_path: Optional[Path] = None, startup_dir: Optional[Path] = None) -> bool:
@@ -1722,13 +1866,26 @@ class SettingsDialog(QtWidgets.QDialog):
 # ============================================================
 
 class DesktopCompanionApp(QtCore.QObject):
+    _confirm_requested = QtCore.Signal(str, str, str, object, object)
+    _clipboard_requested = QtCore.Signal(str, str, object, object, object)
+
     def __init__(self, app: QtWidgets.QApplication, config: CharacterConfig):
         super().__init__()
         self._app = app
         self._config = config
         self._bot_lock = threading.Lock()
+        self._pending_events_lock = threading.Lock()
+        self._pending_events: List[threading.Event] = []
+        self._active_confirm_box: Optional[QtWidgets.QMessageBox] = None
         self._worker_thread: Optional[QtCore.QThread] = None
         self._worker: Optional[StreamWorker] = None
+
+        self._confirm_requested.connect(
+            self._on_confirm_requested, QtCore.Qt.ConnectionType.QueuedConnection
+        )
+        self._clipboard_requested.connect(
+            self._on_clipboard_requested, QtCore.Qt.ConnectionType.QueuedConnection
+        )
 
         self._bot = chatbot.Chatbot(
             chatbot.ChatbotConfig(
@@ -1737,10 +1894,14 @@ class DesktopCompanionApp(QtCore.QObject):
                 thinking_level=config.thinking_level,
                 temperature=config.temperature,
                 use_tools=config.use_tools,
+                enable_system_tools=bool(config.enable_system_tools),
+                system_policy=self._build_system_policy(config),
                 system_prompt=build_effective_system_prompt(
                     config.character_name,
                     config.personality_prompt,
                     config.use_tools,
+                    enable_system_tools=config.enable_system_tools,
+                    allow_all_drives=bool(config.allow_all_user_folders),
                 ),
             )
         )
@@ -1756,6 +1917,8 @@ class DesktopCompanionApp(QtCore.QObject):
         self.character.size_change_requested.connect(self._on_size_changed)
         self.character.open_settings_requested.connect(self.open_settings)
         self.character.clear_chat_requested.connect(self.clear_conversation)
+        self.character.system_tools_toggled.connect(self.toggle_system_tools)
+        self.character.all_drives_toggled.connect(self.toggle_all_drives)
         self.character.provider_change_requested.connect(self.switch_provider)
         self.character.reset_pos_requested.connect(self.reset_position)
         self.character.hide_requested.connect(self.hide_character)
@@ -1784,11 +1947,11 @@ class DesktopCompanionApp(QtCore.QObject):
     def _create_tray_icon(self) -> QtWidgets.QSystemTrayIcon:
         tray = QtWidgets.QSystemTrayIcon(
             QtGui.QIcon(draw_pet_pixmap(64, self._config.sprite_path)),
-            self._app,
+            self,
         )
         tray.setToolTip(f"{self._config.character_name} Desktop Companion (Ctrl+Shift+Space)")
 
-        menu = QtWidgets.QMenu()
+        menu = QtWidgets.QMenu(self.character)
         menu.addAction("Show / Toggle Chat", self.summon_from_hotkey)
         menu.addAction("Show Character", self.show_character)
         menu.addAction("Customize Character...", self.open_settings)
@@ -1897,6 +2060,191 @@ class DesktopCompanionApp(QtCore.QObject):
         else:
             self.toggle_popup()
 
+    def _build_system_policy(self, cfg: CharacterConfig) -> system_tools.SystemToolsPolicy:
+        roots = [
+            Path(p).expanduser()
+            for p in (cfg.allowed_folders or [])
+            if str(p).strip()
+        ]
+        if not roots:
+            roots = system_tools.default_allowed_dirs()
+        # Use weakref proxies so ChatbotConfig -> SystemToolsPolicy never keeps a
+        # strong reference cycle back to DesktopCompanionApp (QObject).
+        weak_self = weakref.ref(self)
+
+        def _confirm_proxy(title: str, detail: str, risk: str) -> bool:
+            owner = weak_self()
+            return owner._confirm_on_ui(title, detail, risk) if owner is not None else False
+
+        def _clipboard_proxy(action: str, text: str, paths: List[str]) -> str:
+            owner = weak_self()
+            return (
+                owner._clipboard_on_ui(action, text, paths)
+                if owner is not None
+                else "Error: Desktop companion is closed."
+            )
+
+        return system_tools.SystemToolsPolicy(
+            enabled=bool(cfg.enable_system_tools),
+            allowed_roots=roots,
+            allow_all_non_system=bool(cfg.allow_all_user_folders),
+            confirm_destructive=True,
+            confirm_app_launch=bool(cfg.confirm_app_launch),
+            confirm_callback=_confirm_proxy,
+            clipboard_callback=_clipboard_proxy,
+        )
+
+    def _dispatch_ui_sync(
+        self,
+        direct_fn: Any,
+        signal: QtCore.SignalInstance,
+        *args: Any,
+        default_result: Any = None,
+    ) -> Any:
+        """Run a UI callback synchronously from either the GUI thread or a worker QThread."""
+        if QtCore.QThread.currentThread() == self.thread():
+            return direct_fn(*args)
+        result_box: Dict[str, Any] = {"value": default_result}
+        done = threading.Event()
+        with self._pending_events_lock:
+            self._pending_events.append(done)
+        try:
+            signal.emit(*args, result_box, done)
+            done.wait(timeout=120.0)
+        finally:
+            with self._pending_events_lock:
+                if done in self._pending_events:
+                    self._pending_events.remove(done)
+        return result_box["value"]
+
+    def _confirm_on_ui(self, title: str, detail: str, risk: str) -> bool:
+        return bool(
+            self._dispatch_ui_sync(
+                self._prompt_confirm_dialog,
+                self._confirm_requested,
+                title,
+                detail,
+                risk,
+                default_result=False,
+            )
+        )
+
+    def _clipboard_on_ui(self, action: str, text: str, paths: List[str]) -> str:
+        return str(
+            self._dispatch_ui_sync(
+                self._exec_clipboard_ui,
+                self._clipboard_requested,
+                action,
+                text,
+                paths,
+                default_result="Cancelled.",
+            )
+        )
+
+    @QtCore.Slot(str, str, str, object, object)
+    def _on_confirm_requested(
+        self,
+        title: str,
+        detail: str,
+        risk: str,
+        result_box: Dict[str, Any],
+        done: threading.Event,
+    ) -> None:
+        try:
+            if not done.is_set():
+                result_box["value"] = self._prompt_confirm_dialog(title, detail, risk)
+        finally:
+            done.set()
+
+    @QtCore.Slot(str, str, object, object, object)
+    def _on_clipboard_requested(
+        self,
+        action: str,
+        text: str,
+        paths: Any,
+        result_box: Dict[str, Any],
+        done: threading.Event,
+    ) -> None:
+        try:
+            if not done.is_set():
+                result_box["value"] = self._exec_clipboard_ui(action, text, list(paths or []))
+        finally:
+            done.set()
+
+    def _prompt_confirm_dialog(self, title: str, detail: str, risk: str) -> bool:
+        parent = (
+            self.popup
+            if self.popup.isVisible()
+            else (self.character if self.character.isVisible() else None)
+        )
+        box = QtWidgets.QMessageBox(parent)
+        box.setWindowTitle(f"Allow {self._config.character_name}?")
+        if risk in ("destructive", "overwrite"):
+            box.setIcon(QtWidgets.QMessageBox.Icon.Warning)
+        else:
+            box.setIcon(QtWidgets.QMessageBox.Icon.Question)
+        box.setTextFormat(QtCore.Qt.TextFormat.PlainText)
+        box.setText(title)
+        box.setInformativeText(detail)
+        allow_btn = box.addButton("Allow", QtWidgets.QMessageBox.ButtonRole.AcceptRole)
+        deny_btn = box.addButton("Deny", QtWidgets.QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(deny_btn)
+        box.setWindowFlags(box.windowFlags() | QtCore.Qt.WindowType.WindowStaysOnTopHint)
+        self._active_confirm_box = box
+        try:
+            box.exec()
+            return box.clickedButton() == allow_btn
+        finally:
+            if self._active_confirm_box is box:
+                self._active_confirm_box = None
+            box.deleteLater()
+
+    def _exec_clipboard_ui(self, action: str, text: str, paths: List[str]) -> str:
+        cb = QtWidgets.QApplication.clipboard()
+        if cb is None:
+            return "Error: Clipboard is unavailable."
+        if action == "get":
+            mime = cb.mimeData()
+            if mime is not None and mime.hasUrls():
+                urls = [u.toLocalFile() or u.toString() for u in mime.urls()]
+                txt = cb.text()
+                if urls and not txt:
+                    return "Clipboard files:\n" + "\n".join(urls)
+                if urls and txt:
+                    return f"Clipboard text:\n{txt}\nClipboard files:\n" + "\n".join(urls)
+            content = cb.text()
+            return content if content else "(Clipboard is empty)"
+        if action == "set":
+            cb.setText(text)
+            return f"Copied {len(text)} character(s) to clipboard."
+        if action == "copy_files":
+            mime = QtCore.QMimeData()
+            mime.setUrls([QtCore.QUrl.fromLocalFile(p) for p in paths])
+            cb.setMimeData(mime)
+            return (
+                f"Copied {len(paths)} file/folder path(s) to Windows clipboard "
+                "(ready for Ctrl+V paste)."
+            )
+        return f"Error: Unsupported clipboard action '{action}'."
+
+    def toggle_system_tools(self, enabled: bool) -> None:
+        self._config.enable_system_tools = bool(enabled)
+        self._apply_updated_config(self._config)
+        state = "enabled" if self._config.enable_system_tools else "disabled"
+        self.character.show_speech_bubble(f"PC & File Control {state}!")
+
+    def toggle_all_drives(self, enabled: bool) -> None:
+        self._config.allow_all_user_folders = bool(enabled)
+        if enabled and not self._config.enable_system_tools:
+            self._config.enable_system_tools = True
+        self._apply_updated_config(self._config)
+        label = (
+            "All-Drive Control ON!"
+            if self._config.allow_all_user_folders
+            else "Restricted to Allowed Folders!"
+        )
+        self.character.show_speech_bubble(label)
+
     def _apply_updated_config(self, new_cfg: CharacterConfig, refresh_keys: bool = False) -> None:
         self._config = new_cfg
         self._config.save()
@@ -1909,10 +2257,14 @@ class DesktopCompanionApp(QtCore.QObject):
                 thinking_level=new_cfg.thinking_level,
                 temperature=new_cfg.temperature,
                 use_tools=new_cfg.use_tools,
+                enable_system_tools=bool(new_cfg.enable_system_tools),
+                system_policy=self._build_system_policy(new_cfg),
                 system_prompt=build_effective_system_prompt(
                     new_cfg.character_name,
                     new_cfg.personality_prompt,
                     new_cfg.use_tools,
+                    enable_system_tools=new_cfg.enable_system_tools,
+                    allow_all_drives=bool(new_cfg.allow_all_user_folders),
                 ),
             )
         self.character.apply_config(new_cfg)
@@ -1997,6 +2349,11 @@ class DesktopCompanionApp(QtCore.QObject):
         if self._worker is not None:
             self._worker.cancel_event.set()
             self.popup.set_status("Stopping...")
+        if self._active_confirm_box is not None:
+            self._active_confirm_box.reject()
+        with self._pending_events_lock:
+            for ev in self._pending_events:
+                ev.set()
 
     def _on_worker_token(self, token: str) -> None:
         self.character.set_state("talking")

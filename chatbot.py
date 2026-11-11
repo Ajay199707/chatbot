@@ -30,10 +30,11 @@ import json
 import os
 from pathlib import Path
 import queue
+import re
 import sys
 import threading
 import time
-from typing import Any, AsyncIterator, Dict, Generator, List, Optional
+from typing import Any, AsyncIterator, Dict, Generator, List, Optional, Tuple
 import urllib.parse
 import xml.etree.ElementTree as ET
 
@@ -42,6 +43,8 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 import uvicorn
+
+import system_tools
 
 try:
     from dotenv import load_dotenv
@@ -458,8 +461,15 @@ TOOL_SPECS: List[Dict[str, Any]] = [
 TOOL_FUNCTIONS = {spec["name"]: spec["fn"] for spec in TOOL_SPECS}
 
 
-def build_openai_tools() -> List[Dict[str, Any]]:
-    """Build OpenAI/NVIDIA-compatible tool declarations."""
+def build_openai_tools(
+    include_system: bool = False,
+    *,
+    include_web: bool = True,
+) -> List[Dict[str, Any]]:
+    """Build OpenAI/NVIDIA/Groq/Grok-compatible tool declarations."""
+    specs = (list(TOOL_SPECS) if include_web else []) + (
+        list(system_tools.SYSTEM_TOOL_SPECS) if include_system else []
+    )
     return [
         {
             "type": "function",
@@ -473,14 +483,21 @@ def build_openai_tools() -> List[Dict[str, Any]]:
                 },
             },
         }
-        for spec in TOOL_SPECS
+        for spec in specs
     ]
 
 
-def build_gemini_tools() -> List[Dict[str, Any]]:
+def build_gemini_tools(
+    include_system: bool = False,
+    *,
+    include_web: bool = True,
+) -> List[Dict[str, Any]]:
     """Build Gemini REST API functionDeclarations (omits parameters if none exist)."""
+    specs = (list(TOOL_SPECS) if include_web else []) + (
+        list(system_tools.SYSTEM_TOOL_SPECS) if include_system else []
+    )
     declarations: List[Dict[str, Any]] = []
-    for spec in TOOL_SPECS:
+    for spec in specs:
         decl: Dict[str, Any] = {
             "name": spec["name"],
             "description": spec["description"],
@@ -494,6 +511,10 @@ def build_gemini_tools() -> List[Dict[str, Any]]:
                 }
                 if "enum" in v:
                     prop_schema["enum"] = list(v["enum"])
+                if "items" in v and isinstance(v["items"], dict):
+                    prop_schema["items"] = {
+                        "type": str(v["items"].get("type", "string")).upper()
+                    }
                 gemini_props[k] = prop_schema
             decl["parameters"] = {
                 "type": "OBJECT",
@@ -508,11 +529,12 @@ TOOLS = build_openai_tools()
 GEMINI_TOOLS = build_gemini_tools()
 
 
-def execute_tool(name: str, args: Any) -> str:
-    """Safely execute a registered tool with validated arguments."""
-    fn = TOOL_FUNCTIONS.get(name)
-    if fn is None:
-        return json.dumps({"error": f"Unknown tool: {name}"})
+def execute_tool(
+    name: str,
+    args: Any,
+    system_policy: Optional[system_tools.SystemToolsPolicy] = None,
+) -> str:
+    """Safely execute a registered web or system tool with validated arguments."""
     if isinstance(args, str):
         try:
             args = json.loads(args) if args.strip() else {}
@@ -520,6 +542,21 @@ def execute_tool(name: str, args: Any) -> str:
             return json.dumps({"error": f"Invalid JSON arguments for {name}: {exc}"})
     if not isinstance(args, dict):
         args = {}
+
+    if name in system_tools.SYSTEM_TOOL_FUNCTIONS:
+        if system_policy is None or not system_policy.enabled:
+            return json.dumps({"error": f"PC & File Control tool '{name}' is disabled."})
+        try:
+            res = system_tools.execute_system_tool(name, args, system_policy)
+            return res if res is not None else json.dumps({"error": f"Unknown tool: {name}"})
+        except TypeError as exc:
+            return json.dumps({"error": f"Invalid arguments for {name}: {exc}"})
+        except Exception as exc:
+            return json.dumps({"error": f"Tool {name} failed: {exc}"})
+
+    fn = TOOL_FUNCTIONS.get(name)
+    if fn is None:
+        return json.dumps({"error": f"Unknown tool: {name}"})
     try:
         return str(fn(**args))
     except TypeError as exc:
@@ -555,6 +592,8 @@ class ChatbotConfig:
     thinking_level: str = "MEDIUM"
     use_tools: bool = True
     max_tool_rounds: int = 5
+    enable_system_tools: bool = False
+    system_policy: Optional[system_tools.SystemToolsPolicy] = None
 
 
 def requires_api_key(provider: str) -> bool:
@@ -780,6 +819,8 @@ class Chatbot:
         temperature: Optional[float] = None,
         system_prompt: Optional[str] = None,
         use_tools: Optional[bool] = None,
+        enable_system_tools: Optional[bool] = None,
+        system_policy: Optional[system_tools.SystemToolsPolicy] = None,
     ) -> None:
         """Update runtime configuration without losing conversation history."""
         if provider is not None and provider != self.config.provider:
@@ -798,7 +839,16 @@ class Chatbot:
             self.config.system_prompt = system_prompt
         if use_tools is not None:
             self.config.use_tools = bool(use_tools)
+        if enable_system_tools is not None:
+            self.config.enable_system_tools = bool(enable_system_tools)
+        if system_policy is not None:
+            self.config.system_policy = system_policy
         self._resolve_provider()
+
+    def _active_system_policy(self) -> Optional[system_tools.SystemToolsPolicy]:
+        if not self.config.enable_system_tools:
+            return None
+        return self.config.system_policy or system_tools.SystemToolsPolicy(enabled=True)
 
     def reset_history(self) -> None:
         self.history.clear()
@@ -859,17 +909,28 @@ class Chatbot:
             yield {"type": "error", "message": "Empty message."}
             return
 
-        tools_enabled = self.config.use_tools if use_tools is None else bool(use_tools)
+        web_tools_enabled = self.config.use_tools if use_tools is None else bool(use_tools)
+        sys_tools_enabled = (
+            bool(self.config.enable_system_tools)
+            if use_tools is None
+            else (bool(use_tools) and bool(self.config.enable_system_tools))
+        )
         self.add_message(Message(role="user", content=text))
 
         try:
             protocol = PROVIDER_SPECS.get(self.config.provider, {}).get("protocol", "mock")
             if protocol == "gemini":
-                gen = self._stream_gemini_turn(tools_enabled, cancel_event)
+                gen = self._stream_gemini_turn(
+                    web_tools_enabled, cancel_event, include_system=sys_tools_enabled
+                )
             elif protocol == "openai":
-                gen = self._stream_openai_turn(tools_enabled, cancel_event)
+                gen = self._stream_openai_turn(
+                    web_tools_enabled, cancel_event, include_system=sys_tools_enabled
+                )
             else:
-                gen = self._stream_mock_turn(text, tools_enabled, cancel_event)
+                gen = self._stream_mock_turn(
+                    text, web_tools_enabled, cancel_event, include_system=sys_tools_enabled
+                )
 
             for event in gen:
                 yield event
@@ -900,7 +961,12 @@ class Chatbot:
             contents.append({"role": "model", "parts": [{"text": msg.content or " "}]})
         return contents
 
-    def _build_gemini_payload(self, contents: List[Dict[str, Any]], tools_enabled: bool) -> Dict[str, Any]:
+    def _build_gemini_payload(
+        self,
+        contents: List[Dict[str, Any]],
+        tools_enabled: bool,
+        include_system: bool = False,
+    ) -> Dict[str, Any]:
         generation_config: Dict[str, Any] = {
             "temperature": self.config.temperature,
             "maxOutputTokens": self.config.max_tokens,
@@ -923,14 +989,19 @@ class Chatbot:
             payload["system_instruction"] = {
                 "parts": [{"text": self.config.system_prompt}]
             }
-        if tools_enabled:
-            payload["tools"] = GEMINI_TOOLS
+        if tools_enabled or include_system:
+            payload["tools"] = build_gemini_tools(
+                include_system=include_system,
+                include_web=tools_enabled,
+            )
         return payload
 
     def _stream_gemini_turn(
         self,
         tools_enabled: bool,
         cancel_event: Optional[threading.Event] = None,
+        *,
+        include_system: bool = False,
     ) -> Generator[Dict[str, Any], None, None]:
         api_key = resolve_api_key("gemini", self.config.api_key)
         if not api_key:
@@ -962,7 +1033,9 @@ class Chatbot:
                 if cancel_event and cancel_event.is_set():
                     break
 
-                payload = self._build_gemini_payload(contents, tools_enabled)
+                payload = self._build_gemini_payload(
+                    contents, tools_enabled, include_system=include_system
+                )
                 round_parts: List[Dict[str, Any]] = []
                 function_calls: List[Dict[str, Any]] = []
                 finish_reason: Optional[str] = None
@@ -972,10 +1045,11 @@ class Chatbot:
                         err = _format_http_error(resp)
                         if (
                             resp.status_code == 400
-                            and tools_enabled
+                            and (tools_enabled or include_system)
                             and ("tool" in err.lower() or "function" in err.lower())
                         ):
                             tools_enabled = False
+                            include_system = False
                             continue
                         self.add_message(Message(role="assistant", content=f"[Error: {err}]"))
                         yield {"type": "error", "message": err}
@@ -1020,7 +1094,7 @@ class Chatbot:
                 if cancel_event and cancel_event.is_set():
                     break
 
-                if function_calls and tools_enabled:
+                if function_calls and (tools_enabled or include_system):
                     model_turn = {"role": "model", "parts": round_parts}
                     func_parts: List[Dict[str, Any]] = []
 
@@ -1028,7 +1102,7 @@ class Chatbot:
                         fn_name = fc.get("name", "")
                         fn_args = fc.get("args") or {}
                         yield {"type": "tool_start", "name": fn_name, "args": fn_args}
-                        result_str = execute_tool(fn_name, fn_args)
+                        result_str = execute_tool(fn_name, fn_args, system_policy=self._active_system_policy())
                         yield {"type": "tool_end", "name": fn_name, "result": result_str}
                         recorded_tools.append(
                             {"name": fn_name, "args": fn_args, "result": result_str}
@@ -1094,6 +1168,8 @@ class Chatbot:
         self,
         tools_enabled: bool,
         cancel_event: Optional[threading.Event] = None,
+        *,
+        include_system: bool = False,
     ) -> Generator[Dict[str, Any], None, None]:
         provider = self.config.provider
         api_key = resolve_api_key(provider, self.config.api_key)
@@ -1141,8 +1217,11 @@ class Chatbot:
                         "max_tokens": self.config.max_tokens,
                         "stream": True,
                     }
-                    if tools_enabled:
-                        payload["tools"] = TOOLS
+                    if tools_enabled or include_system:
+                        payload["tools"] = build_openai_tools(
+                            include_system=include_system,
+                            include_web=tools_enabled,
+                        )
                         payload["tool_choice"] = "auto"
 
                     round_text_parts: List[str] = []
@@ -1153,10 +1232,11 @@ class Chatbot:
                             err = _format_http_error(resp)
                             if (
                                 resp.status_code == 400
-                                and tools_enabled
+                                and (tools_enabled or include_system)
                                 and ("tool" in err.lower() or "function" in err.lower())
                             ):
                                 tools_enabled = False
+                                include_system = False
                                 continue
                             if resp.status_code == 404 and not retried_model:
                                 low = err.lower()
@@ -1215,7 +1295,7 @@ class Chatbot:
                     if cancel_event and cancel_event.is_set():
                         break
 
-                    if tool_calls_by_idx and tools_enabled:
+                    if tool_calls_by_idx and (tools_enabled or include_system):
                         ordered_calls = [tool_calls_by_idx[k] for k in sorted(tool_calls_by_idx)]
                         messages.append(
                             {
@@ -1233,7 +1313,7 @@ class Chatbot:
                                 parsed_args = {}
 
                             yield {"type": "tool_start", "name": fn_name, "args": parsed_args}
-                            result_str = execute_tool(fn_name, raw_args)
+                            result_str = execute_tool(fn_name, raw_args, system_policy=self._active_system_policy())
                             yield {"type": "tool_end", "name": fn_name, "result": result_str}
                             recorded_tools.append(
                                 {"name": fn_name, "args": parsed_args, "result": result_str}
@@ -1284,6 +1364,8 @@ class Chatbot:
         user_input: str,
         tools_enabled: bool,
         cancel_event: Optional[threading.Event] = None,
+        *,
+        include_system: bool = False,
     ) -> Generator[Dict[str, Any], None, None]:
         lower = user_input.lower()
         recorded_tools: List[Dict[str, Any]] = []
@@ -1292,7 +1374,80 @@ class Chatbot:
         yield {"type": "thought", "content": thought}
 
         tool_plan: Optional[tuple[str, Dict[str, Any]]] = None
-        if tools_enabled:
+        if include_system:
+            drive_m = re.search(
+                r"(?:\bdrive\s+([a-zA-Z])\b|\b([a-zA-Z])\s*(?:drive|:[/\\]?))",
+                user_input,
+                re.IGNORECASE,
+            )
+            drive_root = (
+                f"{(drive_m.group(1) or drive_m.group(2)).upper()}:\\" if drive_m else ""
+            )
+            close_m = re.match(
+                r"^\s*(?:please\s+)?(?:close|quit|kill|stop|exit|terminate)\s+(?:the\s+)?(?:app(?:lication)?\s+)?(.+?)\s*[?.!]*$",
+                user_input,
+                re.IGNORECASE,
+            )
+            if any(kw in lower for kw in ("recyclebin", "recycle bin", "recycle", "trash")):
+                tool_plan = ("list_recycle_bin", {})
+            elif any(kw in lower for kw in ("running app", "running process", "open app", "active window")):
+                tool_plan = ("list_running_apps", {})
+            elif close_m and close_m.group(1).strip():
+                tool_plan = ("close_app", {"target": close_m.group(1).strip()})
+            elif any(
+                kw in lower
+                for kw in ("folder size", "occupies more storage", "more storage", "most storage", "most space", "disk usage")
+            ):
+                folder = ""
+                if "download" in lower:
+                    folder = "Downloads"
+                elif "desktop" in lower:
+                    folder = "Desktop"
+                elif "document" in lower:
+                    folder = "Documents"
+                sz_path = drive_root or folder
+                tool_plan = ("get_folder_size", {"path": sz_path} if sz_path else {})
+            elif any(kw in lower for kw in ("search", "find")) and not any(
+                w in lower for w in ("gold", "silver", "news", "time", "date")
+            ):
+                skip_words = {
+                    "search", "find", "for", "files", "file", "my", "in", "on",
+                    "the", "folder", "drive", "drives", "downloads", "desktop", "documents", "please",
+                }
+                if drive_m:
+                    d_ch = (drive_m.group(1) or drive_m.group(2)).lower()
+                    skip_words.update({d_ch, f"{d_ch}:", f"{d_ch}:\\", f"{d_ch}:/"})
+                tokens = [
+                    t.strip(" ?.,'\"")
+                    for t in lower.split()
+                    if t.strip(" ?.,'\"") not in skip_words
+                ]
+                query = " ".join(tokens).strip() or "*"
+                s_args: Dict[str, Any] = {"query": query}
+                if drive_root:
+                    s_args["directory"] = drive_root
+                tool_plan = ("search_files", s_args)
+            elif drive_root:
+                tool_plan = ("list_directory", {"path": drive_root})
+            elif any(
+                kw in lower
+                for kw in ("drives", "all drive", "all the drive", "which drive", "what drive", "this pc", "my computer")
+            ):
+                tool_plan = ("list_drives", {})
+            elif any(
+                kw in lower
+                for kw in ("download", "desktop", "document", "folder", "files", "file ", "directory", "allowed", "drive")
+            ):
+                folder = ""
+                if "download" in lower:
+                    folder = "Downloads"
+                elif "desktop" in lower:
+                    folder = "Desktop"
+                elif "document" in lower:
+                    folder = "Documents"
+                tool_plan = ("list_directory", {"path": folder} if folder else {})
+
+        if tool_plan is None and tools_enabled:
             if "gold" in lower or "silver" in lower:
                 tool_plan = ("get_india_gold_price", {})
             elif "news" in lower:
@@ -1304,23 +1459,28 @@ class Chatbot:
         if tool_plan:
             fn_name, fn_args = tool_plan
             yield {"type": "tool_start", "name": fn_name, "args": fn_args}
-            result_str = execute_tool(fn_name, fn_args)
+            result_str = execute_tool(
+                fn_name, fn_args, system_policy=self._active_system_policy()
+            )
             yield {"type": "tool_end", "name": fn_name, "result": result_str}
             recorded_tools.append({"name": fn_name, "args": fn_args, "result": result_str})
             reply = f"### Mock Tool Result (`{fn_name}`)\n\n{result_str}"
         else:
             reply = (
                 f"**[Mock Mode]** You asked: _{user_input}_\n\n"
-                "To chat with **Google Gemini**, set `GEMINI_API_KEY` and select **Google Gemini** "
-                "in the sidebar."
+                "Mock Mode only simulates offline replies. For full AI tool use "
+                "(search, create, copy/move, Recycle Bin, app launch), click **Edit** "
+                "or right-click -> **Switch Provider** to pick **Groq**, **Grok**, "
+                "**Google Gemini**, **NVIDIA**, or local **Ollama**."
             )
 
+        delay = 0.002 if len(reply) > 350 else 0.015
         for token in reply.split(" "):
             if cancel_event and cancel_event.is_set():
                 break
             chunk = token + " "
             yield {"type": "token", "content": chunk}
-            time.sleep(0.015)
+            time.sleep(delay)
 
         self.add_message(
             Message(

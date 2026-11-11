@@ -10,9 +10,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import desktop_companion as dc  # noqa: E402
 
+_QAPP = None
+
 
 def _get_qapp() -> QtWidgets.QApplication:
-    return QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    global _QAPP
+    if _QAPP is None:
+        _QAPP = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    return _QAPP
 
 
 def test_character_config_roundtrip(tmp_path):
@@ -64,6 +69,11 @@ def test_markdown_to_qt_html_escapes_script_and_formats_elements():
     assert "<pre" in rendered and "print(&#x27;hi&#x27;)" in rendered
     assert "https://example.com" in rendered
 
+    # Partial streaming headings or fences with extra args must terminate without hanging
+    for partial in ("### ", "## ", "# ", "```python extra info\ncode\n```"):
+        partial_html = dc.markdown_to_qt_html(partial)
+        assert isinstance(partial_html, str) and len(partial_html) > 0
+
 
 def test_character_widget_renders_default_and_custom_png(tmp_path):
     _get_qapp()
@@ -92,6 +102,9 @@ def test_character_widget_renders_default_and_custom_png(tmp_path):
     widget.set_state("happy")
     widget.show_speech_bubble("Hello!")
     widget.close()
+    widget.deleteLater()
+    QtWidgets.QApplication.sendPostedEvents(None, QtCore.QEvent.Type.DeferredDelete)
+    QtWidgets.QApplication.processEvents()
 
 
 def _cleanup_controller(app, controller) -> None:
@@ -100,10 +113,14 @@ def _cleanup_controller(app, controller) -> None:
         controller._worker_thread.wait(2000)
     controller.character._anim_timer.stop()
     controller._hotkey_filter.unregister()
-    controller.popup.hide()
-    controller.character.hide()
+    app.removeNativeEventFilter(controller._hotkey_filter)
+    controller.popup.close()
+    controller.popup.deleteLater()
+    controller.character.close()
+    controller.character.deleteLater()
     controller._tray.hide()
     controller.deleteLater()
+    app.sendPostedEvents(None, QtCore.QEvent.Type.DeferredDelete)
     app.processEvents()
 
 
@@ -123,18 +140,22 @@ def test_desktop_companion_app_streams_mock_reply(monkeypatch, tmp_path):
         assert controller.popup.isVisible()
 
         finished_texts = []
-        loop = QtCore.QEventLoop()
+        loop = QtCore.QEventLoop(controller)
 
-        timer = QtCore.QTimer()
+        timer = QtCore.QTimer(loop)
         timer.timeout.connect(lambda: loop.quit() if controller._worker_thread is None and finished_texts else None)
 
         controller.send_user_message("hello buddy")
         assert controller._worker is not None
         controller._worker.finished.connect(lambda txt: finished_texts.append(txt))
         timer.start(25)
-        QtCore.QTimer.singleShot(4000, loop.quit)
+        stopper = QtCore.QTimer(loop)
+        stopper.setSingleShot(True)
+        stopper.timeout.connect(loop.quit)
+        stopper.start(4000)
         loop.exec()
         timer.stop()
+        stopper.stop()
 
         assert finished_texts
         assert "Mock Mode" in finished_texts[-1]
@@ -162,6 +183,9 @@ def test_character_resize_down_to_tiny_and_popup_width(monkeypatch, tmp_path):
         updated = dlg.updated_config()
         assert updated.character_size == 60
         dlg.close()
+        dlg.deleteLater()
+        app.sendPostedEvents(None, QtCore.QEvent.Type.DeferredDelete)
+        app.processEvents()
 
         assert controller.popup.width() == 410
     finally:
@@ -210,6 +234,9 @@ def test_popup_missing_key_banner_toggles(monkeypatch):
     popup.apply_config(dc.CharacterConfig(provider="mock"))
     assert popup._key_banner.isHidden() is True
     popup.close()
+    popup.deleteLater()
+    QtWidgets.QApplication.sendPostedEvents(None, QtCore.QEvent.Type.DeferredDelete)
+    QtWidgets.QApplication.processEvents()
 
 
 def test_get_launch_target_frozen_vs_script(monkeypatch, tmp_path):
@@ -258,6 +285,9 @@ def test_popup_quota_banner_and_ollama_no_key_banner():
     assert popup._quota_banner.isHidden() is True
     assert switched == [("ollama", "")]
     popup.close()
+    popup.deleteLater()
+    QtWidgets.QApplication.sendPostedEvents(None, QtCore.QEvent.Type.DeferredDelete)
+    QtWidgets.QApplication.processEvents()
 
 
 def test_settings_dialog_saves_grok_and_tavily_keys(tmp_path, monkeypatch):
@@ -282,3 +312,164 @@ def test_settings_dialog_saves_grok_and_tavily_keys(tmp_path, monkeypatch):
     assert os.getenv("GROK_API_KEY") == "xai-unit-test-123"
     assert os.getenv("TAVILY_API_KEY") == "tvly-unit-test-456"
     dlg.close()
+    dlg.deleteLater()
+    QtWidgets.QApplication.sendPostedEvents(None, QtCore.QEvent.Type.DeferredDelete)
+    QtWidgets.QApplication.processEvents()
+
+
+def test_settings_dialog_system_tools_roundtrip(tmp_path):
+    _get_qapp()
+    custom_dir = tmp_path / "work"
+    custom_dir.mkdir()
+    cfg = dc.CharacterConfig(
+        enable_system_tools=False,
+        confirm_app_launch=True,
+        allow_all_user_folders=False,
+        allowed_folders=[str(tmp_path)],
+    )
+    dlg = dc.SettingsDialog(cfg)
+    dlg._sys_tools_chk.setChecked(True)
+    dlg._confirm_launch_chk.setChecked(False)
+    dlg._all_folders_chk.setChecked(True)
+    dlg._allowed_dirs_edit.setPlainText(f"{tmp_path}\n{custom_dir}")
+
+    updated = dlg.updated_config()
+    assert updated.enable_system_tools is True
+    assert updated.confirm_app_launch is False
+    assert updated.allow_all_user_folders is True
+    assert updated.allowed_folders == [str(tmp_path), str(custom_dir)]
+    dlg.close()
+    dlg.deleteLater()
+    QtWidgets.QApplication.sendPostedEvents(None, QtCore.QEvent.Type.DeferredDelete)
+    QtWidgets.QApplication.processEvents()
+
+    cfg_path = tmp_path / "character_config.json"
+    updated.save(cfg_path)
+    reloaded = dc.CharacterConfig.load(cfg_path)
+    assert reloaded.enable_system_tools is True
+    assert reloaded.confirm_app_launch is False
+    assert reloaded.allow_all_user_folders is True
+    assert reloaded.allowed_folders == [str(tmp_path), str(custom_dir)]
+
+
+def test_companion_system_tools_toggle_clipboard_and_confirm(monkeypatch, tmp_path):
+    import threading
+
+    app = _get_qapp()
+    monkeypatch.setattr(dc, "CONFIG_FILE", tmp_path / "character_config.json")
+    monkeypatch.setattr(dc.CharacterConfig, "save", lambda self, path=None: None)
+
+    cfg = dc.CharacterConfig(
+        character_name="Lumi",
+        provider="mock",
+        use_tools=True,
+        enable_system_tools=False,
+        allowed_folders=[str(tmp_path)],
+        hotkey_enabled=False,
+    )
+    controller = dc.DesktopCompanionApp(app, cfg)
+    try:
+        assert controller.popup._files_chip is not None
+        assert controller.popup._files_chip.isHidden() is True
+        assert controller._bot.config.enable_system_tools is False
+
+        controller.toggle_system_tools(True)
+        assert controller._config.enable_system_tools is True
+        assert controller._bot.config.enable_system_tools is True
+        assert controller._bot.config.system_policy.enabled is True
+        assert controller.popup._files_chip.isHidden() is False
+        assert "PC Control ON" in controller.popup._status_lbl.text()
+
+        # Clipboard set / get / copy_files
+        set_msg = controller._exec_clipboard_ui("set", "hello clip", [])
+        assert "10 character" in set_msg
+        assert controller._exec_clipboard_ui("get", "", []) == "hello clip"
+
+        sample = tmp_path / "paste_me.txt"
+        sample.write_text("hi", encoding="utf-8")
+        copy_msg = controller._exec_clipboard_ui("copy_files", "", [str(sample)])
+        assert "Copied 1 file/folder" in copy_msg
+        assert "paste_me.txt" in controller._exec_clipboard_ui("get", "", [])
+
+        # Confirm dialog requested off GUI thread -> Allow button clicked on UI thread
+        results = []
+
+        def worker_call():
+            results.append(
+                controller._confirm_on_ui(
+                    "Move to Recycle Bin",
+                    f"Send to Windows Recycle Bin:\n{sample}",
+                    "destructive",
+                )
+            )
+
+        t = threading.Thread(target=worker_call, daemon=True)
+        t.start()
+
+        deadline_loop = QtCore.QEventLoop(controller)
+        poll = QtCore.QTimer(deadline_loop)
+
+        def check_dialog():
+            box = controller._active_confirm_box
+            if box is not None:
+                for btn in box.buttons():
+                    if btn.text() == "Allow":
+                        btn.click()
+                        break
+                else:
+                    box.reject()
+            if not t.is_alive():
+                deadline_loop.quit()
+
+        poll.timeout.connect(check_dialog)
+        poll.start(20)
+        stopper = QtCore.QTimer(deadline_loop)
+        stopper.setSingleShot(True)
+        stopper.timeout.connect(deadline_loop.quit)
+        stopper.start(3000)
+        deadline_loop.exec()
+        poll.stop()
+        stopper.stop()
+        if controller._active_confirm_box is not None:
+            controller._active_confirm_box.reject()
+        t.join(timeout=1.0)
+        assert results == [True]
+
+        controller.toggle_system_tools(False)
+        assert controller._bot.config.enable_system_tools is False
+        assert controller.popup._files_chip.isHidden() is True
+    finally:
+        _cleanup_controller(app, controller)
+
+
+def test_pc_control_badge_visible_when_web_tools_disabled(monkeypatch, tmp_path):
+    app = _get_qapp()
+    monkeypatch.setattr(dc, "CONFIG_FILE", tmp_path / "character_config.json")
+    monkeypatch.setattr(dc.CharacterConfig, "save", lambda self, path=None: None)
+
+    cfg = dc.CharacterConfig(
+        character_name="Lumi",
+        provider="mock",
+        use_tools=False,
+        enable_system_tools=True,
+        allow_all_user_folders=False,
+        allowed_folders=[str(tmp_path)],
+        hotkey_enabled=False,
+    )
+    controller = dc.DesktopCompanionApp(app, cfg)
+    try:
+        assert controller._bot.config.enable_system_tools is True
+        assert controller._bot.config.system_policy.enabled is True
+        assert controller._bot.config.system_policy.allow_all_non_system is False
+        assert controller.popup._files_chip is not None
+        assert controller.popup._files_chip.isHidden() is False
+        assert "PC Control ON" in controller.popup._status_lbl.text()
+
+        # Toggling All-Drive Control updates policy, system prompt, and status badge
+        controller.toggle_all_drives(True)
+        assert controller._config.allow_all_user_folders is True
+        assert controller._bot.config.system_policy.allow_all_non_system is True
+        assert "All Drives" in controller.popup._status_lbl.text()
+        assert "list_drives" in controller._bot.config.system_prompt
+    finally:
+        _cleanup_controller(app, controller)
