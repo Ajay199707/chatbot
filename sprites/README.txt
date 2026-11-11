@@ -1,0 +1,3 @@
+Place custom character PNG, animated GIF, or WebP sprite files here.
+You can also drag-and-drop any image directly onto the floating character,
+or choose one from Right-click -> Choose Sprite Image / GIF...

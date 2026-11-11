@@ -1,0 +1,1581 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Gemini AI Chatbot</title>
+  <style>
+    :root {
+      --bg: #0b0f17;
+      --bg-elevated: #111827;
+      --bg-panel: #161f30;
+      --bg-hover: #1e293b;
+      --bg-code: #090d14;
+      --border: #243044;
+      --text: #e5e7eb;
+      --text-muted: #94a3b8;
+      --accent: #3b82f6;
+      --accent-2: #06b6d4;
+      --accent-soft: rgba(59, 130, 246, 0.14);
+      --user-bubble: #1d4ed8;
+      --user-text: #ffffff;
+      --success: #10b981;
+      --warn: #f59e0b;
+      --danger: #ef4444;
+      --shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
+      --radius: 14px;
+    }
+
+    html[data-theme="light"] {
+      --bg: #f8fafc;
+      --bg-elevated: #ffffff;
+      --bg-panel: #f1f5f9;
+      --bg-hover: #e2e8f0;
+      --bg-code: #0f172a;
+      --border: #cbd5e1;
+      --text: #0f172a;
+      --text-muted: #475569;
+      --accent: #2563eb;
+      --accent-2: #0891b2;
+      --accent-soft: rgba(37, 99, 235, 0.1);
+      --user-bubble: #2563eb;
+      --user-text: #ffffff;
+      --shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
+    }
+
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      padding: 0;
+      height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+      font-size: 15px;
+      line-height: 1.55;
+    }
+
+    .app {
+      display: flex;
+      height: 100vh;
+      overflow: hidden;
+    }
+
+    /* Sidebar */
+    .sidebar {
+      width: 300px;
+      flex-shrink: 0;
+      background: var(--bg-elevated);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      transition: transform 0.22s ease, margin-left 0.22s ease;
+      z-index: 30;
+    }
+    .sidebar.collapsed {
+      margin-left: -300px;
+    }
+    .sidebar-header {
+      padding: 16px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-weight: 700;
+      font-size: 15px;
+      letter-spacing: -0.01em;
+    }
+    .brand-badge {
+      width: 30px;
+      height: 30px;
+      border-radius: 9px;
+      background: linear-gradient(135deg, var(--accent), var(--accent-2));
+      display: grid;
+      place-items: center;
+      color: #fff;
+      font-weight: 800;
+      font-size: 14px;
+    }
+
+    .sidebar-body {
+      flex: 1;
+      overflow-y: auto;
+      padding: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 7px;
+      border: 1px solid var(--border);
+      background: var(--bg-panel);
+      color: var(--text);
+      border-radius: 10px;
+      padding: 9px 12px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.15s ease, border-color 0.15s ease, transform 0.08s ease;
+    }
+    .btn:hover { background: var(--bg-hover); }
+    .btn:active { transform: translateY(1px); }
+    .btn-primary {
+      background: linear-gradient(135deg, var(--accent), var(--accent-2));
+      color: #fff;
+      border: none;
+    }
+    .btn-primary:hover { filter: brightness(1.06); background: linear-gradient(135deg, var(--accent), var(--accent-2)); }
+    .btn-sm { padding: 5px 9px; font-size: 12px; border-radius: 8px; }
+    .btn-icon { width: 34px; height: 34px; padding: 0; }
+
+    .section-label {
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--text-muted);
+      margin-bottom: 6px;
+    }
+
+    .session-list {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      max-height: 170px;
+      overflow-y: auto;
+    }
+    .session-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+      padding: 8px 10px;
+      border-radius: 9px;
+      cursor: pointer;
+      font-size: 13px;
+      color: var(--text-muted);
+      border: 1px solid transparent;
+    }
+    .session-item:hover { background: var(--bg-hover); color: var(--text); }
+    .session-item.active {
+      background: var(--accent-soft);
+      color: var(--text);
+      border-color: rgba(59, 130, 246, 0.35);
+    }
+    .session-title {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      flex: 1;
+    }
+    .session-del {
+      opacity: 0;
+      background: none;
+      border: none;
+      color: var(--text-muted);
+      cursor: pointer;
+      font-size: 14px;
+      padding: 0 4px;
+    }
+    .session-item:hover .session-del { opacity: 1; }
+    .session-del:hover { color: var(--danger); }
+
+    .field {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+    }
+    .field label {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-muted);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    select, input[type="text"], textarea.sys-prompt {
+      width: 100%;
+      background: var(--bg);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 9px;
+      padding: 8px 10px;
+      font-size: 13px;
+      font-family: inherit;
+      outline: none;
+    }
+    select:focus, input[type="text"]:focus, textarea.sys-prompt:focus {
+      border-color: var(--accent);
+    }
+    textarea.sys-prompt {
+      resize: vertical;
+      min-height: 70px;
+      line-height: 1.4;
+    }
+
+    .pill-group {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 4px;
+      background: var(--bg);
+      padding: 3px;
+      border-radius: 9px;
+      border: 1px solid var(--border);
+    }
+    .pill-btn {
+      border: none;
+      background: transparent;
+      color: var(--text-muted);
+      padding: 5px 6px;
+      border-radius: 7px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .pill-btn.active {
+      background: var(--accent);
+      color: #fff;
+    }
+
+    .toggle-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 10px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 9px;
+      font-size: 13px;
+    }
+
+    .status-card {
+      padding: 10px 12px;
+      border-radius: 10px;
+      font-size: 12px;
+      border: 1px solid var(--border);
+      background: var(--bg);
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .status-dot {
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      margin-right: 6px;
+    }
+    .dot-ok { background: var(--success); }
+    .dot-warn { background: var(--warn); }
+
+    /* Main Panel */
+    .main {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+      position: relative;
+    }
+
+    .topbar {
+      height: 56px;
+      padding: 0 18px;
+      border-bottom: 1px solid var(--border);
+      background: var(--bg-elevated);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .topbar-left {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 0;
+    }
+    .model-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 10px;
+      border-radius: 999px;
+      background: var(--bg-panel);
+      border: 1px solid var(--border);
+      font-size: 12px;
+      font-weight: 600;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .topbar-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    /* Key banner */
+    .banner {
+      margin: 12px auto 0;
+      width: min(860px, calc(100% - 32px));
+      padding: 10px 14px;
+      border-radius: 10px;
+      background: rgba(245, 158, 11, 0.12);
+      border: 1px solid rgba(245, 158, 11, 0.4);
+      font-size: 13px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    .banner code {
+      background: rgba(0, 0, 0, 0.25);
+      padding: 2px 6px;
+      border-radius: 5px;
+      font-size: 12px;
+    }
+
+    /* Messages */
+    .chat-scroll {
+      flex: 1;
+      overflow-y: auto;
+      padding: 20px 16px 28px;
+      scroll-behavior: smooth;
+    }
+    .chat-inner {
+      width: min(860px, 100%);
+      margin: 0 auto;
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+    }
+
+    .welcome {
+      margin-top: 6vh;
+      text-align: center;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 14px;
+    }
+    .welcome-icon {
+      width: 56px;
+      height: 56px;
+      border-radius: 16px;
+      background: linear-gradient(135deg, var(--accent), var(--accent-2));
+      display: grid;
+      place-items: center;
+      color: #fff;
+      font-size: 24px;
+      font-weight: 800;
+      box-shadow: var(--shadow);
+    }
+    .welcome h1 {
+      margin: 0;
+      font-size: 24px;
+      letter-spacing: -0.02em;
+    }
+    .welcome p {
+      margin: 0;
+      color: var(--text-muted);
+      max-width: 540px;
+      font-size: 14px;
+    }
+    .chips {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 10px;
+      width: 100%;
+      margin-top: 12px;
+    }
+    .chip {
+      text-align: left;
+      padding: 12px 14px;
+      border-radius: 12px;
+      background: var(--bg-elevated);
+      border: 1px solid var(--border);
+      color: var(--text);
+      cursor: pointer;
+      font-size: 13px;
+      transition: border-color 0.15s ease, background 0.15s ease;
+    }
+    .chip:hover {
+      background: var(--bg-hover);
+      border-color: var(--accent);
+    }
+    .chip strong {
+      display: block;
+      font-size: 13px;
+      margin-bottom: 3px;
+    }
+    .chip span {
+      color: var(--text-muted);
+      font-size: 12px;
+    }
+
+    .msg-row {
+      display: flex;
+      gap: 12px;
+      align-items: flex-start;
+    }
+    .msg-row.user {
+      justify-content: flex-end;
+    }
+    .avatar {
+      width: 32px;
+      height: 32px;
+      border-radius: 10px;
+      display: grid;
+      place-items: center;
+      font-weight: 700;
+      font-size: 12px;
+      flex-shrink: 0;
+      margin-top: 2px;
+    }
+    .avatar.assistant {
+      background: linear-gradient(135deg, var(--accent), var(--accent-2));
+      color: #fff;
+    }
+    .avatar.user {
+      background: var(--bg-panel);
+      border: 1px solid var(--border);
+      color: var(--text);
+      order: 2;
+    }
+
+    .msg-card {
+      max-width: min(740px, calc(100% - 48px));
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .msg-row.user .msg-card {
+      align-items: flex-end;
+    }
+
+    .bubble {
+      padding: 12px 16px;
+      border-radius: var(--radius);
+      word-break: break-word;
+    }
+    .msg-row.user .bubble {
+      background: var(--user-bubble);
+      color: var(--user-text);
+      border-bottom-right-radius: 4px;
+      white-space: pre-wrap;
+    }
+    .msg-row.assistant .bubble {
+      background: var(--bg-elevated);
+      border: 1px solid var(--border);
+      border-top-left-radius: 4px;
+      width: 100%;
+    }
+
+    /* Tool & Thinking indicators */
+    .meta-block {
+      background: var(--bg-panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      font-size: 12px;
+      overflow: hidden;
+      width: 100%;
+    }
+    .meta-block summary {
+      padding: 7px 11px;
+      cursor: pointer;
+      color: var(--text-muted);
+      font-weight: 600;
+      user-select: none;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .meta-block summary:hover { color: var(--text); }
+    .meta-content {
+      padding: 8px 11px;
+      border-top: 1px solid var(--border);
+      color: var(--text-muted);
+      white-space: pre-wrap;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12px;
+      max-height: 220px;
+      overflow-y: auto;
+    }
+
+    .tool-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 9px;
+      border-radius: 8px;
+      background: var(--accent-soft);
+      border: 1px solid rgba(59, 130, 246, 0.3);
+      font-size: 12px;
+      color: var(--text);
+    }
+    .spinner {
+      width: 11px;
+      height: 11px;
+      border: 2px solid var(--border);
+      border-top-color: var(--accent-2);
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+      display: inline-block;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .msg-actions {
+      display: flex;
+      gap: 6px;
+      opacity: 0;
+      transition: opacity 0.15s ease;
+    }
+    .msg-row:hover .msg-actions { opacity: 1; }
+
+    /* Markdown styling */
+    .md h1, .md h2, .md h3, .md h4 {
+      margin: 0.7em 0 0.35em;
+      line-height: 1.3;
+    }
+    .md h1:first-child, .md h2:first-child, .md h3:first-child { margin-top: 0; }
+    .md p { margin: 0 0 0.7em; }
+    .md p:last-child { margin-bottom: 0; }
+    .md ul, .md ol { margin: 0.4em 0 0.7em; padding-left: 1.4em; }
+    .md li { margin: 0.2em 0; }
+    .md a { color: var(--accent-2); text-decoration: underline; }
+    .md blockquote {
+      margin: 0.6em 0;
+      padding: 6px 12px;
+      border-left: 3px solid var(--accent);
+      background: var(--bg-panel);
+      border-radius: 0 8px 8px 0;
+      color: var(--text-muted);
+    }
+    .md code.inline {
+      background: var(--bg-panel);
+      border: 1px solid var(--border);
+      padding: 1px 5px;
+      border-radius: 5px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.88em;
+    }
+    .code-wrap {
+      margin: 0.7em 0;
+      border-radius: 10px;
+      overflow: hidden;
+      border: 1px solid var(--border);
+      background: var(--bg-code);
+      color: #e2e8f0;
+    }
+    .code-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 6px 12px;
+      background: rgba(255, 255, 255, 0.05);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      font-size: 11px;
+      color: #94a3b8;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    .code-copy {
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      color: #e2e8f0;
+      border-radius: 6px;
+      padding: 2px 8px;
+      font-size: 11px;
+      cursor: pointer;
+    }
+    .code-copy:hover { background: rgba(255, 255, 255, 0.16); }
+    .code-wrap pre {
+      margin: 0;
+      padding: 12px;
+      overflow-x: auto;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 13px;
+      line-height: 1.45;
+    }
+    .md table {
+      border-collapse: collapse;
+      margin: 0.7em 0;
+      width: 100%;
+      font-size: 13px;
+      display: block;
+      overflow-x: auto;
+    }
+    .md th, .md td {
+      border: 1px solid var(--border);
+      padding: 6px 10px;
+      text-align: left;
+    }
+    .md th { background: var(--bg-panel); font-weight: 700; }
+    .md hr { border: none; border-top: 1px solid var(--border); margin: 0.9em 0; }
+
+    /* Composer */
+    .composer-wrap {
+      padding: 12px 16px 16px;
+      background: linear-gradient(to top, var(--bg) 75%, transparent);
+    }
+    .composer {
+      width: min(860px, 100%);
+      margin: 0 auto;
+      background: var(--bg-elevated);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 10px 12px;
+      display: flex;
+      align-items: flex-end;
+      gap: 10px;
+      box-shadow: var(--shadow);
+    }
+    .composer:focus-within { border-color: var(--accent); }
+    .composer textarea {
+      flex: 1;
+      border: none;
+      background: transparent;
+      color: var(--text);
+      resize: none;
+      outline: none;
+      font-family: inherit;
+      font-size: 15px;
+      line-height: 1.45;
+      max-height: 180px;
+      min-height: 24px;
+      padding: 4px 2px;
+    }
+    .composer-hint {
+      width: min(860px, 100%);
+      margin: 6px auto 0;
+      display: flex;
+      justify-content: space-between;
+      font-size: 11px;
+      color: var(--text-muted);
+      padding: 0 4px;
+    }
+
+    @media (max-width: 820px) {
+      .sidebar {
+        position: fixed;
+        top: 0;
+        bottom: 0;
+        left: 0;
+        box-shadow: var(--shadow);
+      }
+      .sidebar.collapsed {
+        margin-left: 0;
+        transform: translateX(-100%);
+      }
+      .msg-card { max-width: calc(100% - 42px); }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <!-- Sidebar -->
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-header">
+        <div class="brand">
+          <div class="brand-badge">G</div>
+          <span>Gemini Chatbot</span>
+        </div>
+        <button class="btn btn-sm" id="newChatBtn" title="Start a new chat">+ New</button>
+      </div>
+
+      <div class="sidebar-body">
+        <div>
+          <div class="section-label">Conversations</div>
+          <div class="session-list" id="sessionList"></div>
+        </div>
+
+        <div class="field">
+          <label for="providerSelect">Provider</label>
+          <select id="providerSelect">
+            <option value="gemini">Google Gemini</option>
+            <option value="ollama">Ollama (Local Free · Unlimited)</option>
+            <option value="groq">Groq Cloud (Free API · No Card)</option>
+            <option value="grok">xAI Grok</option>
+            <option value="nvidia">NVIDIA NIM (Free API)</option>
+            <option value="mock">Mock (Offline Demo)</option>
+          </select>
+        </div>
+
+        <div class="field">
+          <label for="modelSelect">Model</label>
+          <select id="modelSelect"></select>
+          <input type="text" id="customModelInput" placeholder="Custom model ID (optional)" />
+        </div>
+
+        <div class="field" id="thinkingField">
+          <label>Thinking Level (Gemini)</label>
+          <div class="pill-group" id="thinkingPills">
+            <button type="button" class="pill-btn" data-level="LOW">Low</button>
+            <button type="button" class="pill-btn active" data-level="MEDIUM">Medium</button>
+            <button type="button" class="pill-btn" data-level="HIGH">High</button>
+          </div>
+        </div>
+
+        <div class="toggle-row">
+          <span>Real-time Tools (Web Search, Gold, News, Time)</span>
+          <input type="checkbox" id="toolsToggle" checked />
+        </div>
+
+        <div class="field">
+          <label for="tempRange">Temperature <span id="tempVal">0.7</span></label>
+          <input type="range" id="tempRange" min="0" max="1.5" step="0.1" value="0.7" />
+        </div>
+
+        <div class="field">
+          <label for="sysPrompt">System Prompt</label>
+          <textarea class="sys-prompt" id="sysPrompt"></textarea>
+        </div>
+
+        <div class="status-card" id="keyStatusCard">
+          <div><span class="status-dot dot-warn"></span>Checking status...</div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Main Chat Area -->
+    <main class="main">
+      <header class="topbar">
+        <div class="topbar-left">
+          <button class="btn btn-icon" id="toggleSidebarBtn" title="Toggle sidebar">☰</button>
+          <div class="model-pill" id="activeModelPill">gemini / gemini-3.8-flash</div>
+        </div>
+        <div class="topbar-actions">
+          <button class="btn btn-sm" id="themeBtn" title="Toggle dark/light theme">Theme</button>
+          <button class="btn btn-sm" id="clearChatBtn" title="Clear current conversation">Clear</button>
+        </div>
+      </header>
+
+      <div class="banner" id="keyBanner" style="display:none;">
+        <div>
+          <strong>API Key not set</strong> for <span id="bannerProvider">gemini</span>.
+          Set <code>GEMINI_API_KEY</code> in PowerShell or <code>.env</code>, or test offline:
+        </div>
+        <button class="btn btn-sm btn-primary" id="switchMockBtn">Switch to Mock Demo</button>
+      </div>
+
+      <div class="chat-scroll" id="chatScroll">
+        <div class="chat-inner" id="chatInner"></div>
+      </div>
+
+      <div class="composer-wrap">
+        <form class="composer" id="chatForm">
+          <textarea
+            id="promptInput"
+            rows="1"
+            placeholder="Message Gemini... (Enter to send, Shift+Enter for new line)"
+            autocomplete="off"
+          ></textarea>
+          <button type="button" class="btn" id="stopBtn" style="display:none;">Stop</button>
+          <button type="submit" class="btn btn-primary" id="sendBtn">Send</button>
+        </form>
+        <div class="composer-hint">
+          <span id="statusHint">Ready</span>
+          <span>Tools: India Gold/Silver, Google News, Date/Time</span>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <script>
+    // ========================================================
+    // STATE & STORAGE
+    // ========================================================
+    const STORAGE_KEY = "gemini_chatbot_sessions_v2";
+    const THEME_KEY = "gemini_chatbot_theme";
+
+    const state = {
+      sessions: [],
+      activeSessionId: null,
+      status: null,
+      isStreaming: false,
+      abortController: null,
+      thinkingLevel: "MEDIUM",
+      messagesCache: {}, // sessionId -> [{role, content, thoughts, tool_calls}]
+    };
+
+    const el = {
+      sidebar: document.getElementById("sidebar"),
+      toggleSidebarBtn: document.getElementById("toggleSidebarBtn"),
+      newChatBtn: document.getElementById("newChatBtn"),
+      sessionList: document.getElementById("sessionList"),
+      providerSelect: document.getElementById("providerSelect"),
+      modelSelect: document.getElementById("modelSelect"),
+      customModelInput: document.getElementById("customModelInput"),
+      thinkingField: document.getElementById("thinkingField"),
+      thinkingPills: document.getElementById("thinkingPills"),
+      toolsToggle: document.getElementById("toolsToggle"),
+      tempRange: document.getElementById("tempRange"),
+      tempVal: document.getElementById("tempVal"),
+      sysPrompt: document.getElementById("sysPrompt"),
+      keyStatusCard: document.getElementById("keyStatusCard"),
+      keyBanner: document.getElementById("keyBanner"),
+      bannerProvider: document.getElementById("bannerProvider"),
+      switchMockBtn: document.getElementById("switchMockBtn"),
+      activeModelPill: document.getElementById("activeModelPill"),
+      themeBtn: document.getElementById("themeBtn"),
+      clearChatBtn: document.getElementById("clearChatBtn"),
+      chatScroll: document.getElementById("chatScroll"),
+      chatInner: document.getElementById("chatInner"),
+      chatForm: document.getElementById("chatForm"),
+      promptInput: document.getElementById("promptInput"),
+      sendBtn: document.getElementById("sendBtn"),
+      stopBtn: document.getElementById("stopBtn"),
+      statusHint: document.getElementById("statusHint"),
+    };
+
+    function uid() {
+      return "s_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 7);
+    }
+
+    function loadSessions() {
+      try {
+        const raw = localStorage.getItem(STORAGE_KEY);
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (Array.isArray(parsed.sessions) && parsed.sessions.length) {
+            state.sessions = parsed.sessions;
+            state.activeSessionId = parsed.activeSessionId || parsed.sessions[0].id;
+            return;
+          }
+        }
+      } catch {}
+      const id = uid();
+      state.sessions = [{ id, title: "New Chat" }];
+      state.activeSessionId = id;
+      saveSessions();
+    }
+
+    function saveSessions() {
+      try {
+        localStorage.setItem(
+          STORAGE_KEY,
+          JSON.stringify({ sessions: state.sessions, activeSessionId: state.activeSessionId })
+        );
+      } catch {}
+    }
+
+    // ========================================================
+    // XSS-SAFE MARKDOWN RENDERER
+    // ========================================================
+    function escapeHtml(str) {
+      return String(str)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+    }
+
+    function sanitizeUrl(url) {
+      const trimmed = url.trim();
+      if (/^(https?:\/\/|\/)/i.test(trimmed)) return trimmed;
+      return "#";
+    }
+
+    function renderInline(raw) {
+      const codeSpans = [];
+      let s = escapeHtml(raw);
+      s = s.replace(/`([^`]+)`/g, (_, code) => {
+        const idx = codeSpans.length;
+        codeSpans.push(`<code class="inline">${code}</code>`);
+        return `\u0000CODE${idx}\u0000`;
+      });
+      s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_, label, url) => {
+        const safe = escapeHtml(sanitizeUrl(url));
+        return `<a href="${safe}" target="_blank" rel="noopener noreferrer">${label}</a>`;
+      });
+      s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+      s = s.replace(/__([^_]+)__/g, "<strong>$1</strong>");
+      s = s.replace(/~~([^~]+)~~/g, "<del>$1</del>");
+      s = s.replace(/(^|[^\*])\*([^*\n]+)\*(?!\*)/g, "$1<em>$2</em>");
+      s = s.replace(/(^|[^_])_([^_\n]+)_(?!_)/g, "$1<em>$2</em>");
+      s = s.replace(/\u0000CODE(\d+)\u0000/g, (_, idx) => codeSpans[Number(idx)] || "");
+      return s;
+    }
+
+    function renderMarkdown(mdText) {
+      const lines = String(mdText || "").replace(/\r\n/g, "\n").split("\n");
+      let html = "";
+      let i = 0;
+
+      while (i < lines.length) {
+        const line = lines[i];
+
+        // Fenced code block (supports unclosed fences while streaming)
+        const fenceMatch = line.match(/^```([\w.+-]*)\s*$/);
+        if (fenceMatch) {
+          const lang = escapeHtml(fenceMatch[1] || "text");
+          const codeLines = [];
+          i++;
+          while (i < lines.length && !/^```\s*$/.test(lines[i])) {
+            codeLines.push(lines[i]);
+            i++;
+          }
+          if (i < lines.length && /^```\s*$/.test(lines[i])) i++;
+          const codeEsc = escapeHtml(codeLines.join("\n"));
+          html += `<div class="code-wrap"><div class="code-header"><span>${lang}</span><button type="button" class="code-copy" onclick="copyCodeBlock(this)">Copy</button></div><pre><code>${codeEsc}</code></pre></div>`;
+          continue;
+        }
+
+        if (/^\s*$/.test(line)) {
+          i++;
+          continue;
+        }
+
+        if (/^(-{3,}|\*{3,}|_{3,})\s*$/.test(line)) {
+          html += "<hr />";
+          i++;
+          continue;
+        }
+
+        const headingMatch = line.match(/^(#{1,4})\s+(.+)$/);
+        if (headingMatch) {
+          const level = headingMatch[1].length;
+          html += `<h${level}>${renderInline(headingMatch[2])}</h${level}>`;
+          i++;
+          continue;
+        }
+
+        if (/^>\s?/.test(line)) {
+          const quoteLines = [];
+          while (i < lines.length && /^>\s?/.test(lines[i])) {
+            quoteLines.push(lines[i].replace(/^>\s?/, ""));
+            i++;
+          }
+          html += `<blockquote>${quoteLines.map(renderInline).join("<br />")}</blockquote>`;
+          continue;
+        }
+
+        // GFM Table
+        if (
+          line.includes("|") &&
+          i + 1 < lines.length &&
+          /^\s*\|?\s*[-:]+(\s*\|\s*[-:]+)+\s*\|?\s*$/.test(lines[i + 1])
+        ) {
+          const splitRow = (row) =>
+            row.replace(/^\s*\|/, "").replace(/\|\s*$/, "").split("|").map((c) => c.trim());
+          const headers = splitRow(line);
+          i += 2;
+          let tbl = "<table><thead><tr>" + headers.map((h) => `<th>${renderInline(h)}</th>`).join("") + "</tr></thead><tbody>";
+          while (i < lines.length && lines[i].includes("|") && !/^\s*$/.test(lines[i])) {
+            const cells = splitRow(lines[i]);
+            tbl += "<tr>" + headers.map((_, idx) => `<td>${renderInline(cells[idx] || "")}</td>`).join("") + "</tr>";
+            i++;
+          }
+          tbl += "</tbody></table>";
+          html += tbl;
+          continue;
+        }
+
+        // Unordered list
+        if (/^\s*[-*+]\s+/.test(line)) {
+          html += "<ul>";
+          while (i < lines.length && /^\s*[-*+]\s+/.test(lines[i])) {
+            html += `<li>${renderInline(lines[i].replace(/^\s*[-*+]\s+/, ""))}</li>`;
+            i++;
+          }
+          html += "</ul>";
+          continue;
+        }
+
+        // Ordered list
+        if (/^\s*\d+\.\s+/.test(line)) {
+          html += "<ol>";
+          while (i < lines.length && /^\s*\d+\.\s+/.test(lines[i])) {
+            html += `<li>${renderInline(lines[i].replace(/^\s*\d+\.\s+/, ""))}</li>`;
+            i++;
+          }
+          html += "</ol>";
+          continue;
+        }
+
+        // Paragraph
+        const para = [];
+        while (
+          i < lines.length &&
+          !/^\s*$/.test(lines[i]) &&
+          !/^```/.test(lines[i]) &&
+          !/^(#{1,4})\s+/.test(lines[i]) &&
+          !/^>\s?/.test(lines[i]) &&
+          !/^\s*[-*+]\s+/.test(lines[i]) &&
+          !/^\s*\d+\.\s+/.test(lines[i])
+        ) {
+          para.push(renderInline(lines[i]));
+          i++;
+        }
+        html += `<p>${para.join("<br />")}</p>`;
+      }
+
+      return html;
+    }
+
+    window.copyCodeBlock = function (btn) {
+      const code = btn.closest(".code-wrap").querySelector("code").textContent;
+      navigator.clipboard.writeText(code).then(() => {
+        const prev = btn.textContent;
+        btn.textContent = "Copied!";
+        setTimeout(() => (btn.textContent = prev), 1400);
+      });
+    };
+
+    // ========================================================
+    // UI RENDERING
+    // ========================================================
+    function getSelectedModel() {
+      const custom = el.customModelInput.value.trim();
+      return custom || el.modelSelect.value;
+    }
+
+    function updateModelOptions(preferredModel) {
+      const provider = el.providerSelect.value;
+      const models = (state.status && state.status.models[provider]) || [];
+      el.modelSelect.innerHTML = "";
+      for (const m of models) {
+        const opt = document.createElement("option");
+        opt.value = m;
+        opt.textContent = m;
+        el.modelSelect.appendChild(opt);
+      }
+      if (preferredModel && models.includes(preferredModel)) {
+        el.modelSelect.value = preferredModel;
+        el.customModelInput.value = "";
+      } else if (preferredModel && !models.includes(preferredModel) && models.length) {
+        el.customModelInput.value = preferredModel;
+      } else {
+        el.customModelInput.value = "";
+      }
+      el.thinkingField.style.display = provider === "gemini" ? "flex" : "none";
+      updateTopbarAndKeyBanner();
+    }
+
+    function updateTopbarAndKeyBanner() {
+      const provider = el.providerSelect.value;
+      const model = getSelectedModel();
+      el.activeModelPill.textContent = `${provider} / ${model}`;
+
+      if (!state.status) return;
+      const configured = Boolean(state.status.keys_configured[provider]);
+      el.keyBanner.style.display = configured ? "none" : "flex";
+      el.bannerProvider.textContent = provider;
+
+      const geminiOk = state.status.keys_configured.gemini;
+      const groqOk = state.status.keys_configured.groq;
+      const grokOk = state.status.keys_configured.grok;
+      const nvidiaOk = state.status.keys_configured.nvidia;
+      const tavilyOk = state.status.keys_configured.tavily;
+      el.keyStatusCard.innerHTML = `
+        <div><span class="status-dot dot-ok"></span>Ollama Local: Free (No key)</div>
+        <div><span class="status-dot ${geminiOk ? "dot-ok" : "dot-warn"}"></span>Gemini API Key: ${geminiOk ? "Ready" : "Not set"}</div>
+        <div><span class="status-dot ${groqOk ? "dot-ok" : "dot-warn"}"></span>Groq API Key: ${groqOk ? "Ready" : "Not set"}</div>
+        <div><span class="status-dot ${grokOk ? "dot-ok" : "dot-warn"}"></span>Grok (xAI) Key: ${grokOk ? "Ready" : "Not set"}</div>
+        <div><span class="status-dot ${nvidiaOk ? "dot-ok" : "dot-warn"}"></span>NVIDIA API Key: ${nvidiaOk ? "Ready" : "Not set"}</div>
+        <div><span class="status-dot ${tavilyOk ? "dot-ok" : "dot-warn"}"></span>Tavily Web Search: ${tavilyOk ? "Ready" : "Not set"}</div>
+      `;
+    }
+
+    function renderSessionList() {
+      el.sessionList.innerHTML = "";
+      for (const s of state.sessions) {
+        const item = document.createElement("div");
+        item.className = "session-item" + (s.id === state.activeSessionId ? " active" : "");
+        const title = document.createElement("span");
+        title.className = "session-title";
+        title.textContent = s.title || "New Chat";
+        item.appendChild(title);
+
+        if (state.sessions.length > 1) {
+          const del = document.createElement("button");
+          del.type = "button";
+          del.className = "session-del";
+          del.textContent = "×";
+          del.title = "Delete conversation";
+          del.onclick = (e) => {
+            e.stopPropagation();
+            deleteSession(s.id);
+          };
+          item.appendChild(del);
+        }
+
+        item.onclick = () => switchSession(s.id);
+        el.sessionList.appendChild(item);
+      }
+    }
+
+    function isNearBottom() {
+      return el.chatScroll.scrollHeight - el.chatScroll.scrollTop - el.chatScroll.clientHeight < 120;
+    }
+
+    function scrollToBottom(force = false) {
+      if (force || isNearBottom()) {
+        el.chatScroll.scrollTop = el.chatScroll.scrollHeight;
+      }
+    }
+
+    function renderWelcome() {
+      const wrap = document.createElement("div");
+      wrap.className = "welcome";
+      wrap.innerHTML = `
+        <div class="welcome-icon">G</div>
+        <h1>How can I help you today?</h1>
+        <p>Multi-provider AI assistant with real-time streaming, Markdown formatting, and live tools for Tavily web search, Indian bullion rates, news, and date/time.</p>
+        <div class="chips">
+          <button type="button" class="chip" data-prompt="Search the web for the latest AI breakthroughs today and summarize with links.">
+            <strong>Web Search (Tavily)</strong>
+            <span>Real-time web answers with sources</span>
+          </button>
+          <button type="button" class="chip" data-prompt="What is today's gold and silver rate in India?">
+            <strong>Gold &amp; Silver Rate</strong>
+            <span>Live buy/sell quote in INR per gram</span>
+          </button>
+          <button type="button" class="chip" data-prompt="Fetch the latest news headlines on artificial intelligence.">
+            <strong>Latest AI News</strong>
+            <span>Search current Google News headlines</span>
+          </button>
+          <button type="button" class="chip" data-prompt="What is the current date and time right now?">
+            <strong>Current Date &amp; Time</strong>
+            <span>Verify local &amp; UTC time via tool</span>
+          </button>
+        </div>
+      `;
+      wrap.querySelectorAll(".chip").forEach((btn) => {
+        btn.onclick = () => {
+          el.promptInput.value = btn.getAttribute("data-prompt");
+          sendPrompt();
+        };
+      });
+      el.chatInner.appendChild(wrap);
+    }
+
+    function createMessageNode(msg, index, total) {
+      const row = document.createElement("div");
+      row.className = "msg-row " + msg.role;
+
+      const avatar = document.createElement("div");
+      avatar.className = "avatar " + msg.role;
+      avatar.textContent = msg.role === "user" ? "U" : "AI";
+
+      const card = document.createElement("div");
+      card.className = "msg-card";
+
+      // Thinking block
+      if (msg.role === "assistant" && msg.thoughts) {
+        const det = document.createElement("details");
+        det.className = "meta-block";
+        det.innerHTML = `<summary>Thinking process</summary><div class="meta-content"></div>`;
+        det.querySelector(".meta-content").textContent = msg.thoughts;
+        card.appendChild(det);
+      }
+
+      // Tool calls block
+      if (msg.role === "assistant" && Array.isArray(msg.tool_calls) && msg.tool_calls.length) {
+        for (const tc of msg.tool_calls) {
+          const det = document.createElement("details");
+          det.className = "meta-block";
+          const summ = document.createElement("summary");
+          summ.textContent = `Tool used: ${tc.name}(${JSON.stringify(tc.args || {})})`;
+          const body = document.createElement("div");
+          body.className = "meta-content";
+          body.textContent = tc.result || "";
+          det.appendChild(summ);
+          det.appendChild(body);
+          card.appendChild(det);
+        }
+      }
+
+      const bubble = document.createElement("div");
+      bubble.className = "bubble" + (msg.role === "assistant" ? " md" : "");
+      if (msg.role === "user") {
+        bubble.textContent = msg.content;
+      } else {
+        bubble.innerHTML = msg.content ? renderMarkdown(msg.content) : "<em>...</em>";
+      }
+      card.appendChild(bubble);
+
+      if (msg.role === "assistant" && msg.content) {
+        const actions = document.createElement("div");
+        actions.className = "msg-actions";
+        const copyBtn = document.createElement("button");
+        copyBtn.type = "button";
+        copyBtn.className = "btn btn-sm";
+        copyBtn.textContent = "Copy";
+        copyBtn.onclick = () => {
+          navigator.clipboard.writeText(msg.content);
+          copyBtn.textContent = "Copied!";
+          setTimeout(() => (copyBtn.textContent = "Copy"), 1200);
+        };
+        actions.appendChild(copyBtn);
+
+        if (index === total - 1 && !state.isStreaming) {
+          const regenBtn = document.createElement("button");
+          regenBtn.type = "button";
+          regenBtn.className = "btn btn-sm";
+          regenBtn.textContent = "Regenerate";
+          regenBtn.onclick = () => regenerateLast();
+          actions.appendChild(regenBtn);
+        }
+        card.appendChild(actions);
+      }
+
+      row.appendChild(avatar);
+      row.appendChild(card);
+      return { row, card, bubble };
+    }
+
+    function renderMessages() {
+      el.chatInner.innerHTML = "";
+      const msgs = state.messagesCache[state.activeSessionId] || [];
+      if (!msgs.length) {
+        renderWelcome();
+        return;
+      }
+      msgs.forEach((m, idx) => {
+        const { row } = createMessageNode(m, idx, msgs.length);
+        el.chatInner.appendChild(row);
+      });
+      scrollToBottom(true);
+    }
+
+    // ========================================================
+    // API & STREAMING
+    // ========================================================
+    async function fetchStatus() {
+      const resp = await fetch("/api/status");
+      state.status = await resp.json();
+      el.providerSelect.value = state.status.provider || "gemini";
+      el.toolsToggle.checked = Boolean(state.status.use_tools);
+      el.tempRange.value = state.status.temperature ?? 0.7;
+      el.tempVal.textContent = el.tempRange.value;
+      el.sysPrompt.value = state.status.system_prompt || "";
+      state.thinkingLevel = state.status.thinking_level || "MEDIUM";
+      syncThinkingPills();
+      updateModelOptions(state.status.model);
+    }
+
+    function syncThinkingPills() {
+      el.thinkingPills.querySelectorAll(".pill-btn").forEach((btn) => {
+        btn.classList.toggle("active", btn.dataset.level === state.thinkingLevel);
+      });
+    }
+
+    async function loadSessionHistory(sessionId) {
+      const resp = await fetch(`/api/history?session_id=${encodeURIComponent(sessionId)}`);
+      if (resp.ok) {
+        const data = await resp.json();
+        state.messagesCache[sessionId] = data.messages || [];
+      } else {
+        state.messagesCache[sessionId] = state.messagesCache[sessionId] || [];
+      }
+      renderMessages();
+    }
+
+    async function switchSession(sessionId) {
+      if (state.isStreaming) return;
+      state.activeSessionId = sessionId;
+      saveSessions();
+      renderSessionList();
+      await loadSessionHistory(sessionId);
+    }
+
+    function createNewSession() {
+      if (state.isStreaming) return;
+      const id = uid();
+      state.sessions.unshift({ id, title: "New Chat" });
+      state.activeSessionId = id;
+      state.messagesCache[id] = [];
+      saveSessions();
+      renderSessionList();
+      renderMessages();
+      el.promptInput.focus();
+    }
+
+    async function deleteSession(sessionId) {
+      if (state.isStreaming) return;
+      await fetch("/api/clear", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session_id: sessionId }),
+      });
+      delete state.messagesCache[sessionId];
+      state.sessions = state.sessions.filter((s) => s.id !== sessionId);
+      if (!state.sessions.length) {
+        const id = uid();
+        state.sessions = [{ id, title: "New Chat" }];
+      }
+      if (state.activeSessionId === sessionId) {
+        state.activeSessionId = state.sessions[0].id;
+      }
+      saveSessions();
+      renderSessionList();
+      await loadSessionHistory(state.activeSessionId);
+    }
+
+    async function clearCurrentChat() {
+      if (state.isStreaming) return;
+      await fetch("/api/clear", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session_id: state.activeSessionId }),
+      });
+      state.messagesCache[state.activeSessionId] = [];
+      const cur = state.sessions.find((s) => s.id === state.activeSessionId);
+      if (cur) cur.title = "New Chat";
+      saveSessions();
+      renderSessionList();
+      renderMessages();
+    }
+
+    function setStreamingUi(active) {
+      state.isStreaming = active;
+      el.sendBtn.style.display = active ? "none" : "inline-flex";
+      el.stopBtn.style.display = active ? "inline-flex" : "none";
+      el.statusHint.textContent = active ? "Streaming response..." : "Ready";
+    }
+
+    async function regenerateLast() {
+      const msgs = state.messagesCache[state.activeSessionId] || [];
+      for (let i = msgs.length - 1; i >= 0; i--) {
+        if (msgs[i].role === "user") {
+          el.promptInput.value = msgs[i].content;
+          await sendPrompt();
+          break;
+        }
+      }
+    }
+
+    async function sendPrompt() {
+      if (state.isStreaming) return;
+      const text = el.promptInput.value.trim();
+      if (!text) return;
+
+      el.promptInput.value = "";
+      autoResizeTextarea();
+
+      const sid = state.activeSessionId;
+      const msgs = state.messagesCache[sid] || (state.messagesCache[sid] = []);
+      msgs.push({ role: "user", content: text, thoughts: "", tool_calls: [] });
+
+      // Title conversation from first prompt
+      const sess = state.sessions.find((s) => s.id === sid);
+      if (sess && sess.title === "New Chat") {
+        sess.title = text.slice(0, 34) + (text.length > 34 ? "..." : "");
+        saveSessions();
+        renderSessionList();
+      }
+
+      const assistantMsg = { role: "assistant", content: "", thoughts: "", tool_calls: [] };
+      msgs.push(assistantMsg);
+      renderMessages();
+
+      // Grab the live assistant card elements
+      const rows = el.chatInner.querySelectorAll(".msg-row.assistant");
+      const lastRow = rows[rows.length - 1];
+      const liveCard = lastRow.querySelector(".msg-card");
+      const liveBubble = lastRow.querySelector(".bubble");
+
+      let liveThoughtDetails = null;
+      let liveThoughtBody = null;
+      const activeToolChips = {};
+
+      setStreamingUi(true);
+      state.abortController = new AbortController();
+
+      try {
+        const resp = await fetch("/api/chat/stream", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          signal: state.abortController.signal,
+          body: JSON.stringify({
+            session_id: sid,
+            message: text,
+            provider: el.providerSelect.value,
+            model: getSelectedModel(),
+            thinking_level: state.thinkingLevel,
+            temperature: parseFloat(el.tempRange.value),
+            system_prompt: el.sysPrompt.value,
+            use_tools: el.toolsToggle.checked,
+          }),
+        });
+
+        if (!resp.ok) {
+          throw new Error(`HTTP ${resp.status}`);
+        }
+
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
+
+          let sepIdx;
+          while ((sepIdx = buffer.indexOf("\n\n")) !== -1) {
+            const rawEvent = buffer.slice(0, sepIdx);
+            buffer = buffer.slice(sepIdx + 2);
+
+            for (const line of rawEvent.split("\n")) {
+              if (!line.startsWith("data:")) continue;
+              const payload = line.slice(5).trim();
+              if (!payload) continue;
+
+              let ev;
+              try {
+                ev = JSON.parse(payload);
+              } catch {
+                continue;
+              }
+
+              if (ev.type === "thought") {
+                assistantMsg.thoughts += ev.content || "";
+                if (!liveThoughtDetails) {
+                  liveThoughtDetails = document.createElement("details");
+                  liveThoughtDetails.className = "meta-block";
+                  liveThoughtDetails.innerHTML = `<summary>Thinking process</summary><div class="meta-content"></div>`;
+                  liveThoughtBody = liveThoughtDetails.querySelector(".meta-content");
+                  liveCard.insertBefore(liveThoughtDetails, liveBubble);
+                }
+                liveThoughtBody.textContent = assistantMsg.thoughts;
+                scrollToBottom();
+              } else if (ev.type === "tool_start") {
+                el.statusHint.textContent = `Running tool: ${ev.name}...`;
+                const chip = document.createElement("div");
+                chip.className = "tool-chip";
+                chip.innerHTML = `<span class="spinner"></span><span></span>`;
+                chip.querySelector("span:last-child").textContent = `Running ${ev.name}...`;
+                liveCard.insertBefore(chip, liveBubble);
+                (activeToolChips[ev.name] || (activeToolChips[ev.name] = [])).push(chip);
+                scrollToBottom();
+              } else if (ev.type === "tool_end") {
+                el.statusHint.textContent = "Streaming response...";
+                const chips = activeToolChips[ev.name];
+                const chip = chips && chips.shift();
+                if (chip) chip.remove();
+                const tc = { name: ev.name, args: {}, result: ev.result };
+                assistantMsg.tool_calls.push(tc);
+                const det = document.createElement("details");
+                det.className = "meta-block";
+                const summ = document.createElement("summary");
+                summ.textContent = `Tool result: ${ev.name}`;
+                const body = document.createElement("div");
+                body.className = "meta-content";
+                body.textContent = ev.result || "";
+                det.appendChild(summ);
+                det.appendChild(body);
+                liveCard.insertBefore(det, liveBubble);
+                scrollToBottom();
+              } else if (ev.type === "token") {
+                assistantMsg.content += ev.content || "";
+                liveBubble.innerHTML = renderMarkdown(assistantMsg.content);
+                scrollToBottom();
+              } else if (ev.type === "error") {
+                assistantMsg.content = `**Error:** ${ev.message}`;
+                liveBubble.innerHTML = renderMarkdown(assistantMsg.content);
+                scrollToBottom();
+              } else if (ev.type === "done") {
+                if (ev.content && !assistantMsg.content) {
+                  assistantMsg.content = ev.content;
+                }
+                if (Array.isArray(ev.tool_calls)) {
+                  assistantMsg.tool_calls = ev.tool_calls;
+                }
+              }
+            }
+          }
+        }
+      } catch (err) {
+        if (err.name === "AbortError") {
+          assistantMsg.content = assistantMsg.content || "_[Stopped]_";
+        } else {
+          assistantMsg.content = `**Connection Error:** ${err.message}`;
+        }
+      } finally {
+        state.abortController = null;
+        setStreamingUi(false);
+        renderMessages();
+      }
+    }
+
+    function autoResizeTextarea() {
+      el.promptInput.style.height = "auto";
+      el.promptInput.style.height = Math.min(el.promptInput.scrollHeight, 180) + "px";
+    }
+
+    // ========================================================
+    // EVENT LISTENERS & INIT
+    // ========================================================
+    el.toggleSidebarBtn.onclick = () => el.sidebar.classList.toggle("collapsed");
+    el.newChatBtn.onclick = createNewSession;
+    el.clearChatBtn.onclick = clearCurrentChat;
+
+    el.providerSelect.onchange = () => updateModelOptions();
+    el.modelSelect.onchange = () => {
+      el.customModelInput.value = "";
+      updateTopbarAndKeyBanner();
+    };
+    el.customModelInput.oninput = updateTopbarAndKeyBanner;
+
+    el.thinkingPills.querySelectorAll(".pill-btn").forEach((btn) => {
+      btn.onclick = () => {
+        state.thinkingLevel = btn.dataset.level;
+        syncThinkingPills();
+      };
+    });
+
+    el.tempRange.oninput = () => {
+      el.tempVal.textContent = el.tempRange.value;
+    };
+
+    el.switchMockBtn.onclick = () => {
+      el.providerSelect.value = "mock";
+      updateModelOptions();
+    };
+
+    el.themeBtn.onclick = () => {
+      const next = document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark";
+      document.documentElement.setAttribute("data-theme", next);
+      localStorage.setItem(THEME_KEY, next);
+    };
+
+    el.stopBtn.onclick = () => {
+      if (state.abortController) state.abortController.abort();
+    };
+
+    el.promptInput.addEventListener("input", autoResizeTextarea);
+    el.promptInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        sendPrompt();
+      }
+    });
+    el.chatForm.addEventListener("submit", (e) => {
+      e.preventDefault();
+      sendPrompt();
+    });
+
+    (async function init() {
+      const savedTheme = localStorage.getItem(THEME_KEY) || "dark";
+      document.documentElement.setAttribute("data-theme", savedTheme);
+      loadSessions();
+      renderSessionList();
+      await fetchStatus();
+      await loadSessionHistory(state.activeSessionId);
+      el.promptInput.focus();
+    })();
+  </script>
+</body>
+</html>

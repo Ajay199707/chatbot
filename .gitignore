@@ -1,0 +1,16 @@
+# Secrets & local user runtime configuration
+.env
+character_config.json
+
+# PyInstaller / executable build artifacts
+build/
+dist/
+*.exe
+
+# Python environments & caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.log
