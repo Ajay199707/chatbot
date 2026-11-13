@@ -702,6 +702,8 @@
           <label for="providerSelect">Provider</label>
           <select id="providerSelect">
             <option value="gemini">Google Gemini</option>
+            <option value="openai">OpenAI (GPT / o-series)</option>
+            <option value="deepseek">DeepSeek (Chat / Reasoner)</option>
             <option value="ollama">Ollama (Local Free · Unlimited)</option>
             <option value="groq">Groq Cloud (Free API · No Card)</option>
             <option value="grok">xAI Grok</option>
@@ -1073,6 +1075,8 @@
       el.bannerProvider.textContent = provider;
 
       const geminiOk = state.status.keys_configured.gemini;
+      const openaiOk = state.status.keys_configured.openai;
+      const deepseekOk = state.status.keys_configured.deepseek;
       const groqOk = state.status.keys_configured.groq;
       const grokOk = state.status.keys_configured.grok;
       const nvidiaOk = state.status.keys_configured.nvidia;
@@ -1080,6 +1084,8 @@
       el.keyStatusCard.innerHTML = `
         <div><span class="status-dot dot-ok"></span>Ollama Local: Free (No key)</div>
         <div><span class="status-dot ${geminiOk ? "dot-ok" : "dot-warn"}"></span>Gemini API Key: ${geminiOk ? "Ready" : "Not set"}</div>
+        <div><span class="status-dot ${openaiOk ? "dot-ok" : "dot-warn"}"></span>OpenAI API Key: ${openaiOk ? "Ready" : "Not set"}</div>
+        <div><span class="status-dot ${deepseekOk ? "dot-ok" : "dot-warn"}"></span>DeepSeek API Key: ${deepseekOk ? "Ready" : "Not set"}</div>
         <div><span class="status-dot ${groqOk ? "dot-ok" : "dot-warn"}"></span>Groq API Key: ${groqOk ? "Ready" : "Not set"}</div>
         <div><span class="status-dot ${grokOk ? "dot-ok" : "dot-warn"}"></span>Grok (xAI) Key: ${grokOk ? "Ready" : "Not set"}</div>
         <div><span class="status-dot ${nvidiaOk ? "dot-ok" : "dot-warn"}"></span>NVIDIA API Key: ${nvidiaOk ? "Ready" : "Not set"}</div>

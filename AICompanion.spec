@@ -4,7 +4,7 @@
 from PyInstaller.utils.hooks import collect_data_files
 
 datas = [
-    ('assets/app_icon.ico', 'assets'),
+    ('assets', 'assets'),
     ('static', 'static'),
 ]
 datas += collect_data_files('certifi')
@@ -14,7 +14,7 @@ a = Analysis(
     pathex=['.'],
     binaries=[],
     datas=datas,
-    hiddenimports=['chatbot', 'system_tools', 'api_tools', 'certifi'],
+    hiddenimports=['chatbot', 'system_tools', 'api_tools', 'character_painters', 'certifi'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

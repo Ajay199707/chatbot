@@ -32,7 +32,10 @@ if (-not (Test-Path (Join-Path $ProjectDir ".env")) -and (Test-Path (Join-Path $
 }
 
 function New-CompanionShortcut {
-    param([string]$ShortcutPath)
+    param(
+        [string]$ShortcutPath,
+        [switch]$StartupMode
+    )
     $RootExe = Join-Path $ProjectDir "AICompanion.exe"
     $DistExe = Join-Path $ProjectDir "dist\AICompanion.exe"
     $BuiltExe = if (Test-Path $RootExe) { $RootExe } elseif (Test-Path $DistExe) { $DistExe } else { "" }
@@ -41,11 +44,15 @@ function New-CompanionShortcut {
     $sc = $ws.CreateShortcut($ShortcutPath)
     if ($BuiltExe) {
         $sc.TargetPath = $BuiltExe
+        if ($StartupMode) {
+            $sc.Arguments = "--startup"
+        }
         $sc.WorkingDirectory = (Split-Path -Parent $BuiltExe)
         $sc.IconLocation = "$BuiltExe,0"
     } else {
         $sc.TargetPath = $PythonwExe
-        $sc.Arguments = '"' + (Join-Path $ProjectDir "desktop_companion.py") + '"'
+        $ScriptArg = '"' + (Join-Path $ProjectDir "desktop_companion.py") + '"'
+        $sc.Arguments = if ($StartupMode) { "$ScriptArg --startup" } else { $ScriptArg }
         $sc.WorkingDirectory = $ProjectDir
         $IconFile = Join-Path $ProjectDir "assets\app_icon.ico"
         if (Test-Path $IconFile) {
@@ -66,7 +73,7 @@ if ($CreateDesktopShortcut) {
 if ($EnableStartup) {
     $StartupDir = [Environment]::GetFolderPath("Startup")
     $StartupLink = Join-Path $StartupDir "AICharacterCompanion.lnk"
-    New-CompanionShortcut -ShortcutPath $StartupLink
+    New-CompanionShortcut -ShortcutPath $StartupLink -StartupMode
     Write-Host "Enabled Windows Startup launch: $StartupLink" -ForegroundColor Green
 }
 

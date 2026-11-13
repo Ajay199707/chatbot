@@ -22,9 +22,12 @@ Run:
 from __future__ import annotations
 
 import argparse
+import base64
+import copy
 import ctypes
 import ctypes.wintypes
 from dataclasses import asdict, dataclass, field
+from datetime import datetime
 import html
 import json
 import math
@@ -35,13 +38,23 @@ import re
 import subprocess
 import sys
 import threading
-from typing import Any, Dict, List, Optional
+import time
+from typing import Any, Dict, List, Optional, Tuple
 import weakref
 
 from PySide6 import QtCore, QtGui, QtNetwork, QtWidgets
 
 import api_tools
 import chatbot
+import character_painters
+from character_painters import (
+    CHARACTER_PRESETS,
+    CharacterPreset,
+    draw_character_pixmap,
+    get_character_preset,
+    list_character_categories,
+    paint_animated_character,
+)
 import system_tools
 
 
@@ -85,9 +98,105 @@ PERSONA_PRESETS: Dict[str, str] = {
 # CONFIG & MARKDOWN HELPERS
 # ============================================================
 
+TOPIC_KINDS: Tuple[str, ...] = ("news", "gold", "weather", "web_search", "custom_prompt")
+
+
+def default_custom_topics() -> List[Dict[str, Any]]:
+    """Return a fresh starter list of customizable wake-up & daily briefing topics."""
+    return [
+        {
+            "id": "tech",
+            "label": "Tech Field",
+            "kind": "news",
+            "query": "technology AI software",
+            "prompt": "What is happening in the tech field today? Give the top highlights.",
+            "enabled": True,
+        },
+        {
+            "id": "cinema",
+            "label": "Cinema",
+            "kind": "news",
+            "query": "cinema movies box office",
+            "prompt": "What is happening in cinema and new movie releases today?",
+            "enabled": True,
+        },
+        {
+            "id": "gold",
+            "label": "Gold Rate",
+            "kind": "gold",
+            "query": "india gold rate",
+            "prompt": "What is today's gold rate and silver rate in India?",
+            "enabled": True,
+        },
+        {
+            "id": "weather",
+            "label": "Weather",
+            "kind": "weather",
+            "query": "",
+            "prompt": "",
+            "enabled": True,
+        },
+        {
+            "id": "news",
+            "label": "Top News",
+            "kind": "news",
+            "query": "latest top news",
+            "prompt": "What are today's latest top news headlines?",
+            "enabled": True,
+        },
+    ]
+
+
+def _normalize_topic_entry(entry: Any, index: int = 0) -> Optional[Dict[str, Any]]:
+    """Validate and normalize a single custom topic dictionary."""
+    if not isinstance(entry, dict):
+        return None
+    label = str(entry.get("label") or "").strip()
+    if not label:
+        return None
+    kind = str(entry.get("kind") or "custom_prompt").strip().lower()
+    if kind not in TOPIC_KINDS:
+        kind = "custom_prompt"
+    raw_id = str(entry.get("id") or "").strip()
+    if not raw_id:
+        slug = re.sub(r"[^a-z0-9]+", "_", label.lower()).strip("_")
+        raw_id = slug or f"topic_{index + 1}"
+    return {
+        "id": raw_id,
+        "label": label[:40],
+        "kind": kind,
+        "query": str(entry.get("query") or "").strip(),
+        "prompt": str(entry.get("prompt") or "").strip(),
+        "enabled": bool(entry.get("enabled", True)),
+    }
+
+
+def _resolved_topics(topics: Any) -> List[Dict[str, Any]]:
+    """Return normalized topic dicts, falling back to defaults only when unset/invalid."""
+    if not isinstance(topics, list):
+        return default_custom_topics()
+    cleaned: List[Dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for idx, item in enumerate(topics):
+        norm = _normalize_topic_entry(item, index=idx)
+        if norm is None:
+            continue
+        base_id = norm["id"]
+        candidate = base_id
+        suffix = 2
+        while candidate in seen_ids:
+            candidate = f"{base_id}_{suffix}"
+            suffix += 1
+        norm["id"] = candidate
+        seen_ids.add(candidate)
+        cleaned.append(norm)
+    return cleaned
+
+
 @dataclass
 class CharacterConfig:
     character_name: str = "Lumi"
+    character_id: str = "lumi"
     personality_prompt: str = PERSONA_PRESETS["Cute Desktop Pet"]
     sprite_path: str = ""
     character_size: int = 140
@@ -102,6 +211,14 @@ class CharacterConfig:
     allow_all_user_folders: bool = True
     allowed_folders: List[str] = field(default_factory=system_tools.default_allowed_dir_strings)
     hotkey_enabled: bool = True
+    wake_greeting_enabled: bool = True
+    wake_open_chat: bool = True
+    wake_on_system_resume: bool = True
+    wake_resume_cooldown_minutes: int = 120
+    wake_auto_fetch_briefing: bool = False
+    wake_user_name: str = ""
+    wake_weather_city: str = "Chennai"
+    custom_topics: List[Dict[str, Any]] = field(default_factory=default_custom_topics)
     window_pos: Optional[List[int]] = None
 
     @classmethod
@@ -115,6 +232,17 @@ class CharacterConfig:
             cfg = cls(**filtered)
             if cfg.model_name:
                 cfg.model_name = chatbot.normalize_model_for_provider(cfg.provider, cfg.model_name)
+            cfg.custom_topics = _resolved_topics(cfg.custom_topics)
+            clean_cid = str(getattr(cfg, "character_id", "") or "lumi").strip().lower()
+            if clean_cid not in CHARACTER_PRESETS:
+                clean_cid = "lumi"
+            cfg.character_id = clean_cid
+            try:
+                cfg.wake_resume_cooldown_minutes = max(1, min(1440, int(cfg.wake_resume_cooldown_minutes)))
+            except (TypeError, ValueError):
+                cfg.wake_resume_cooldown_minutes = 120
+            cfg.wake_user_name = (cfg.wake_user_name or "").strip()
+            cfg.wake_weather_city = (cfg.wake_weather_city or "Chennai").strip() or "Chennai"
             return cfg
         except Exception:
             return cls()
@@ -124,6 +252,156 @@ class CharacterConfig:
             path.write_text(json.dumps(asdict(self), indent=2), encoding="utf-8")
         except Exception:
             pass
+
+
+def topic_prompt_for_config(topic: Dict[str, Any], cfg: CharacterConfig) -> str:
+    """Resolve the clickable chat prompt for a topic using current config settings."""
+    city = (cfg.wake_weather_city or "Chennai").strip() or "Chennai"
+    raw_prompt = str(topic.get("prompt") or "").strip()
+    if raw_prompt:
+        return raw_prompt.replace("{city}", city)
+    kind = str(topic.get("kind") or "custom_prompt")
+    raw_query = str(topic.get("query") or "").strip()
+    label = str(topic.get("label") or "Updates").strip()
+    query = raw_query or label
+    if kind == "weather":
+        target_city = raw_query or city
+        return f"What is today's weather in {target_city}?"
+    if kind == "gold":
+        return "What is today's gold rate and silver rate in India?"
+    if kind == "news":
+        return f"What is the latest news in {query or label}?"
+    if kind == "web_search":
+        return f"Search the web for latest updates on {query or label}."
+    return f"Give me today's update on {query or label}."
+
+
+def time_of_day_greeting(now: Optional[datetime] = None, user_name: str = "") -> str:
+    """Return a warm time-aware greeting such as 'Good morning, Alex!'."""
+    dt = now or datetime.now()
+    hour = dt.hour
+    if 5 <= hour < 12:
+        salutation = "Good morning"
+    elif 12 <= hour < 17:
+        salutation = "Good afternoon"
+    elif 17 <= hour < 22:
+        salutation = "Good evening"
+    else:
+        salutation = "Hello"
+    clean_user = (user_name or "").strip()
+    if clean_user:
+        return f"{salutation}, {clean_user}!"
+    return f"{salutation}!"
+
+
+def build_wake_greeting_data(
+    cfg: CharacterConfig,
+    now: Optional[datetime] = None,
+    system_resume: bool = False,
+) -> Dict[str, Any]:
+    """Build structured wake-up greeting copy and resolved enabled topics."""
+    greeting = time_of_day_greeting(now=now, user_name=cfg.wake_user_name)
+    topics: List[Dict[str, str]] = []
+    for t in _resolved_topics(cfg.custom_topics):
+        if not t.get("enabled", True):
+            continue
+        topics.append(
+            {
+                "id": str(t["id"]),
+                "label": str(t["label"]),
+                "kind": str(t["kind"]),
+                "query": str(t.get("query") or ""),
+                "prompt": topic_prompt_for_config(t, cfg),
+            }
+        )
+
+    labels = [t["label"] for t in topics]
+    if labels:
+        preview = ", ".join(labels[:3]) if len(labels) <= 3 else ", ".join(labels[:3]) + f", and {labels[3]}"
+        question = f"Do you want to know what is happening in {preview}?"
+        bubble_tail = f"Ask about {', '.join(labels[:3])}!"
+    else:
+        question = "Ask me anything, check your PC files, or add custom topics in Settings."
+        bubble_tail = "How can I assist you?"
+
+    welcome_prefix = "Welcome back! " if system_resume else ""
+    bubble_text = f"{greeting} {welcome_prefix}How can I assist you? {bubble_tail}".strip()
+    if len(bubble_text) > 135:
+        bubble_text = bubble_text[:132].rstrip() + "..."
+
+    return {
+        "greeting": greeting,
+        "welcome_prefix": welcome_prefix,
+        "headline": f"{greeting} {welcome_prefix}How can I assist you?".strip(),
+        "question": question,
+        "bubble_text": bubble_text,
+        "topics": topics,
+    }
+
+
+def _summarize_briefing_lines(raw: str, max_items: int = 2) -> str:
+    """Extract clean, single-line bullet text from a tool response string."""
+    txt = (raw or "").strip()
+    if not txt:
+        return "No updates available."
+    if txt.startswith("{"):
+        try:
+            obj = json.loads(txt)
+            if isinstance(obj, dict) and obj.get("error"):
+                return f"Unavailable ({obj['error']})"
+        except Exception:
+            pass
+    if txt.startswith("Error:"):
+        return txt
+
+    picks: List[str] = []
+    for ln in txt.splitlines():
+        s = ln.strip()
+        if not s or s.startswith("Link:") or s.startswith("Note:") or s.startswith("http"):
+            continue
+        s = re.sub(r"\s+", " ", s).lstrip("-*• ").strip()
+        if len(s) > 120:
+            s = s[:117].rstrip() + "..."
+        picks.append(s)
+        if len(picks) >= max_items:
+            break
+    return " · ".join(picks) if picks else "No updates available."
+
+
+def _fetch_single_topic_summary(topic: Dict[str, Any], cfg: CharacterConfig) -> str:
+    """Fetch a compact 1-2 item live summary for a single enabled topic."""
+    kind = str(topic.get("kind") or "custom_prompt")
+    raw_query = str(topic.get("query") or "").strip()
+    query = raw_query or str(topic.get("label") or "").strip()
+    city = (cfg.wake_weather_city or "Chennai").strip() or "Chennai"
+
+    if kind == "gold":
+        return _summarize_briefing_lines(chatbot.get_india_gold_price(), max_items=2)
+    if kind == "weather":
+        return _summarize_briefing_lines(api_tools.get_weather(raw_query or city, days=1), max_items=2)
+    if kind == "news":
+        return _summarize_briefing_lines(api_tools.get_news(query or "latest news"), max_items=2)
+    if kind == "web_search":
+        return _summarize_briefing_lines(api_tools.web_search(query, max_results=3), max_items=2)
+    search_target = query or topic_prompt_for_config(topic, cfg)
+    return _summarize_briefing_lines(api_tools.web_search(search_target, max_results=3), max_items=2)
+
+
+def fetch_live_briefing_markdown(cfg: CharacterConfig, max_topics: int = 4) -> str:
+    """Fetch a compact live Markdown daily briefing for enabled wake-up topics."""
+    enabled_topics = [t for t in _resolved_topics(cfg.custom_topics) if t.get("enabled", True)]
+    if not enabled_topics:
+        return "_No daily topics are enabled. Open **Edit -> Wake-Up & Topics** to add some._"
+
+    lines: List[str] = ["**Today's Live Briefing**"]
+    for topic in enabled_topics[:max_topics]:
+        label = topic["label"]
+        try:
+            summary = _fetch_single_topic_summary(topic, cfg)
+        except Exception as exc:
+            summary = f"Unavailable ({exc})"
+        lines.append(f"- **{label}:** {summary}")
+    return "\n".join(lines)
 
 
 def build_effective_system_prompt(
@@ -205,17 +483,30 @@ def markdown_to_qt_html(md_text: str) -> str:
         line = lines[i]
         fence = re.match(r"^```(.*)$", line)
         if fence:
-            code_lines: List[str] = []
+            raw_lang = fence.group(1).strip()
+            lang = raw_lang.upper() if raw_lang else "CODE"
+            raw_code_lines: List[str] = []
+            escaped_code_lines: List[str] = []
             i += 1
             while i < len(lines) and not re.match(r"^```\s*$", lines[i]):
-                code_lines.append(html.escape(lines[i]))
+                raw_code_lines.append(lines[i])
+                escaped_code_lines.append(html.escape(lines[i]))
                 i += 1
             if i < len(lines):
                 i += 1
+            raw_code = "\n".join(raw_code_lines)
+            encoded_code = base64.b64encode(raw_code.encode("utf-8")).decode("ascii")
+            code_html = "\n".join(escaped_code_lines)
             out.append(
-                "<pre style='background:#090d14;color:#e2e8f0;padding:8px 10px;"
-                "border-radius:6px;font-family:Consolas,monospace;font-size:12px;"
-                "white-space:pre-wrap;'>" + "\n".join(code_lines) + "</pre>"
+                f"<div style='margin:8px 0;background:#090d16;border:1px solid #1e293b;border-radius:8px;'>"
+                f"<table width='100%' cellpadding='4' cellspacing='0' style='background:#111827;border-bottom:1px solid #1e293b;border-top-left-radius:8px;border-top-right-radius:8px;'>"
+                f"<tr>"
+                f"<td align='left' style='color:#94a3b8;font-size:10px;font-weight:bold;font-family:Segoe UI,sans-serif;'>&nbsp;{lang}</td>"
+                f"<td align='right' style='font-size:11px;'><a href='copy:{encoded_code}' style='color:#38bdf8;text-decoration:none;font-weight:bold;font-family:Segoe UI,sans-serif;'>📋 Copy&nbsp;</a></td>"
+                f"</tr>"
+                f"</table>"
+                f"<pre style='color:#e2e8f0;padding:8px 10px;font-family:Consolas,Courier New,monospace;font-size:12px;white-space:pre-wrap;margin:0;'>{code_html}</pre>"
+                f"</div>"
             )
             continue
 
@@ -269,21 +560,26 @@ def markdown_to_qt_html(md_text: str) -> str:
 
 
 # ============================================================
-# WINDOWS GLOBAL HOTKEY FILTER (Ctrl+Shift+Space)
+# WINDOWS GLOBAL HOTKEY & POWER RESUME FILTER
 # ============================================================
 
 class WindowsHotkeyFilter(QtCore.QAbstractNativeEventFilter):
     WM_HOTKEY = 0x0312
+    WM_POWERBROADCAST = 0x0218
+    PBT_APMRESUMESUSPEND = 0x0007
+    PBT_APMRESUMEAUTOMATIC = 0x0012
     MOD_CONTROL = 0x0002
     MOD_SHIFT = 0x0004
     MOD_NOREPEAT = 0x4000
     VK_SPACE = 0x20
     HOTKEY_ID = 0x4C55
 
-    def __init__(self, on_trigger):
+    def __init__(self, on_trigger, on_system_resume=None):
         super().__init__()
         self._on_trigger = on_trigger
+        self._on_system_resume = on_system_resume
         self._registered = False
+        self._last_resume_monotonic = -10.0
 
     def register(self) -> bool:
         if sys.platform != "win32":
@@ -310,13 +606,26 @@ class WindowsHotkeyFilter(QtCore.QAbstractNativeEventFilter):
                 pass
             self._registered = False
 
+    def _process_win32_msg(self, msg_id: int, wparam: int) -> Tuple[bool, int]:
+        if self._registered and msg_id == self.WM_HOTKEY and wparam == self.HOTKEY_ID:
+            QtCore.QTimer.singleShot(0, self._on_trigger)
+            return True, 0
+        if (
+            self._on_system_resume is not None
+            and msg_id == self.WM_POWERBROADCAST
+            and wparam in (self.PBT_APMRESUMESUSPEND, self.PBT_APMRESUMEAUTOMATIC)
+        ):
+            now_m = time.monotonic()
+            if now_m - self._last_resume_monotonic >= 5.0:
+                self._last_resume_monotonic = now_m
+                QtCore.QTimer.singleShot(0, self._on_system_resume)
+        return False, 0
+
     def nativeEventFilter(self, eventType, message):  # noqa: N802
-        if self._registered and sys.platform == "win32":
+        if sys.platform == "win32":
             try:
                 msg = ctypes.wintypes.MSG.from_address(int(message))
-                if msg.message == self.WM_HOTKEY and msg.wParam == self.HOTKEY_ID:
-                    QtCore.QTimer.singleShot(0, self._on_trigger)
-                    return True, 0
+                return self._process_win32_msg(int(msg.message), int(msg.wParam))
             except Exception:
                 pass
         return False, 0
@@ -391,16 +700,21 @@ def create_windows_shortcut(
         return False
 
 
-def get_launch_target() -> tuple[Path, str, Path]:
+def get_launch_target(startup_mode: bool = False) -> Tuple[Path, str, Path]:
     """Return (target_exe, arguments, working_dir) for Windows shortcuts."""
+    extra = " --startup" if startup_mode else ""
     if getattr(sys, "frozen", False):
         exe_path = Path(sys.executable).resolve()
-        return exe_path, "", exe_path.parent
+        return exe_path, ("--startup" if startup_mode else ""), exe_path.parent
     script_path = Path(__file__).resolve()
-    return resolve_pythonw_executable(), f'"{script_path}"', script_path.parent
+    return resolve_pythonw_executable(), f'"{script_path}"{extra}', script_path.parent
 
 
-def set_startup_enabled(enabled: bool, startup_dir: Optional[Path] = None) -> bool:
+def set_startup_enabled(
+    enabled: bool,
+    startup_dir: Optional[Path] = None,
+    include_startup_flag: bool = True,
+) -> bool:
     shortcut = get_startup_shortcut_path(startup_dir)
     if not enabled:
         try:
@@ -410,7 +724,7 @@ def set_startup_enabled(enabled: bool, startup_dir: Optional[Path] = None) -> bo
         except Exception:
             return False
 
-    target_exe, arguments, working_dir = get_launch_target()
+    target_exe, arguments, working_dir = get_launch_target(startup_mode=include_startup_flag)
     bundled_icon = chatbot.get_bundle_dir() / "assets" / "app_icon.ico"
     local_icon = chatbot.get_app_dir() / "assets" / "app_icon.ico"
     icon_path = local_icon if local_icon.is_file() else (bundled_icon if bundled_icon.is_file() else None)
@@ -513,29 +827,34 @@ class StreamWorker(QtCore.QObject):
         self.finished.emit(final_text)
 
 
+class WakeBriefingWorker(QtCore.QObject):
+    """Fetch a compact live daily briefing in a background thread without blocking chat."""
+
+    briefing_ready = QtCore.Signal(str)
+    finished = QtCore.Signal()
+
+    def __init__(self, config: CharacterConfig):
+        super().__init__()
+        self._config = CharacterConfig(**asdict(config))
+
+    @QtCore.Slot()
+    def run(self) -> None:
+        try:
+            md = fetch_live_briefing_markdown(self._config)
+            self.briefing_ready.emit(md)
+        except Exception as exc:
+            self.briefing_ready.emit(f"_Live briefing unavailable: {exc}_")
+        finally:
+            self.finished.emit()
+
+
 # ============================================================
 # ALWAYS-ON-SCREEN CHARACTER WIDGET
 # ============================================================
 
-def draw_pet_pixmap(size: int = 64, sprite_path: str = "") -> QtGui.QPixmap:
-    """Create a small avatar pixmap (custom sprite thumbnail or default pet)."""
-    if sprite_path and Path(sprite_path).is_file():
-        pm = QtGui.QPixmap(sprite_path)
-        if not pm.isNull():
-            return pm.scaled(
-                size,
-                size,
-                QtCore.Qt.AspectRatioMode.KeepAspectRatio,
-                QtCore.Qt.TransformationMode.SmoothTransformation,
-            )
-
-    pm = QtGui.QPixmap(size, size)
-    pm.fill(QtCore.Qt.GlobalColor.transparent)
-    p = QtGui.QPainter(pm)
-    p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
-    _paint_cute_pet(p, QtCore.QRectF(4, 4, size - 8, size - 8), phase=0.0, state="idle", blinking=False, look_x=0.0, look_y=0.0)
-    p.end()
-    return pm
+def draw_pet_pixmap(size: int = 64, sprite_path: str = "", character_id: str = "lumi") -> QtGui.QPixmap:
+    """Create a small avatar pixmap (custom sprite thumbnail or animated character)."""
+    return draw_character_pixmap(size=size, character_id=character_id, sprite_path=sprite_path)
 
 
 def _paint_cute_pet(
@@ -690,10 +1009,13 @@ def _paint_cute_pet(
 
 class CharacterWidget(QtWidgets.QWidget):
     clicked = QtCore.Signal()
+    greet_requested = QtCore.Signal()
     moved = QtCore.Signal(int, int)
     sprite_dropped = QtCore.Signal(str)
     size_change_requested = QtCore.Signal(int)
     open_settings_requested = QtCore.Signal()
+    avatar_gallery_requested = QtCore.Signal()
+    avatar_preset_requested = QtCore.Signal(str)
     clear_chat_requested = QtCore.Signal()
     provider_change_requested = QtCore.Signal(str)
     system_tools_toggled = QtCore.Signal(bool)
@@ -730,6 +1052,17 @@ class CharacterWidget(QtWidgets.QWidget):
         self._movie: Optional[QtGui.QMovie] = None
         self._speech_text: str = ""
         self._speech_ticks = 0
+
+        self._particles: List[Dict[str, float]] = [
+            {
+                "x": random.uniform(0.15, 0.85),
+                "y": random.uniform(0.15, 0.90),
+                "speed": random.uniform(0.006, 0.016),
+                "size": random.uniform(2.0, 4.2),
+                "phase_offset": random.uniform(0.0, 6.28),
+            }
+            for _ in range(6)
+        ]
 
         self._anim_timer = QtCore.QTimer(self)
         self._anim_timer.timeout.connect(self._on_tick)
@@ -808,6 +1141,13 @@ class CharacterWidget(QtWidgets.QWidget):
             else:
                 self._blinking = True
                 self._next_blink_ticks = 4
+
+        for pt in self._particles:
+            pt["y"] -= pt["speed"]
+            if pt["y"] < 0.05:
+                pt["y"] = 0.95
+                pt["x"] = random.uniform(0.15, 0.85)
+
         self.update()
 
     def paintEvent(self, event: QtGui.QPaintEvent) -> None:  # noqa: N802
@@ -825,6 +1165,41 @@ class CharacterWidget(QtWidgets.QWidget):
 
         top_offset = 14.0 + bob + hop
         char_rect = QtCore.QRectF((w - size) / 2.0, top_offset, size, size)
+
+        # Ambient Neon Halo & Particles
+        preset = get_character_preset(self._config.character_id)
+        accent_color = QtGui.QColor(preset.accent_color)
+
+        glow_rad = size * 0.52
+        center_pt = char_rect.center()
+        pulse = 0.5 + 0.5 * math.sin(self._phase * 1.6)
+        glow_alpha = int(28 + 22 * pulse)
+        if self._state in ("talking", "happy"):
+            glow_alpha = int(glow_alpha * 1.5)
+
+        halo_grad = QtGui.QRadialGradient(center_pt, glow_rad)
+        c0 = QtGui.QColor(accent_color)
+        c0.setAlpha(glow_alpha)
+        c1 = QtGui.QColor(accent_color)
+        c1.setAlpha(glow_alpha // 2)
+        c2 = QtGui.QColor(accent_color)
+        c2.setAlpha(0)
+        halo_grad.setColorAt(0.0, c0)
+        halo_grad.setColorAt(0.65, c1)
+        halo_grad.setColorAt(1.0, c2)
+        p.setPen(QtCore.Qt.PenStyle.NoPen)
+        p.setBrush(halo_grad)
+        p.drawEllipse(center_pt, glow_rad, glow_rad)
+
+        for part in self._particles:
+            part_x = char_rect.left() + part["x"] * size + math.sin(self._phase * 2.0 + part["phase_offset"]) * 6.0
+            part_y = char_rect.top() + part["y"] * size
+            part_sz = part["size"] * (0.8 + 0.4 * math.sin(self._phase * 3.0 + part["phase_offset"]))
+            part_alpha = int(120 + 90 * math.sin(self._phase * 2.5 + part["phase_offset"]))
+            c_part = QtGui.QColor(accent_color)
+            c_part.setAlpha(max(20, min(240, part_alpha)))
+            p.setBrush(c_part)
+            p.drawEllipse(QtCore.QPointF(part_x, part_y), part_sz, part_sz)
 
         if self._movie is not None:
             frame = self._movie.currentPixmap()
@@ -849,7 +1224,8 @@ class CharacterWidget(QtWidgets.QWidget):
             y = char_rect.y() + (size - scaled.height()) / 2.0
             p.drawPixmap(QtCore.QPointF(x, y), scaled)
         else:
-            _paint_cute_pet(
+            paint_animated_character(
+                self._config.character_id,
                 p,
                 char_rect,
                 phase=self._phase,
@@ -859,26 +1235,50 @@ class CharacterWidget(QtWidgets.QWidget):
                 look_y=self._look_y,
             )
 
-        # Mini speech bubble overlay if active (tooltip fallback when character is tiny)
-        if self._speech_text and w >= 115:
-            font = QtGui.QFont("Segoe UI", 8)
-            font.setBold(True)
+        # Comic speech bubble overlay with pointer tail
+        if self._speech_text and w >= 100:
+            font = QtGui.QFont("Segoe UI", 8, QtGui.QFont.Weight.DemiBold)
             p.setFont(font)
             fm = QtGui.QFontMetrics(font)
             text_rect = fm.boundingRect(
-                QtCore.QRect(0, 0, w - 16, 48),
+                QtCore.QRect(0, 0, w - 18, 54),
                 QtCore.Qt.TextFlag.TextWordWrap,
                 self._speech_text,
             )
-            bw = min(w - 8, text_rect.width() + 16)
-            bh = text_rect.height() + 10
-            bubble_rect = QtCore.QRectF((w - bw) / 2.0, 2.0, bw, bh)
-            p.setPen(QtGui.QPen(QtGui.QColor("#38bdf8"), 1.2))
-            p.setBrush(QtGui.QColor(15, 23, 42, 235))
-            p.drawRoundedRect(bubble_rect, 8, 8)
+            bw = min(w - 8, max(64.0, float(text_rect.width() + 18)))
+            bh = float(text_rect.height() + 12)
+            bx = (w - bw) / 2.0
+            by = 2.0
+
+            tail_w = 8.0
+            tail_h = 5.0
+            tail_cx = w / 2.0
+
+            bubble_path = QtGui.QPainterPath()
+            bubble_path.addRoundedRect(QtCore.QRectF(bx, by, bw, bh), 9.0, 9.0)
+
+            tail_path = QtGui.QPainterPath()
+            tail_path.moveTo(tail_cx - tail_w / 2.0, by + bh - 0.5)
+            tail_path.lineTo(tail_cx, by + bh + tail_h)
+            tail_path.lineTo(tail_cx + tail_w / 2.0, by + bh - 0.5)
+            tail_path.closeSubpath()
+
+            unified_path = bubble_path.united(tail_path)
+
+            # Drop shadow
+            p.setPen(QtCore.Qt.PenStyle.NoPen)
+            p.setBrush(QtGui.QColor(0, 0, 0, 70))
+            p.drawPath(unified_path.translated(0, 2.0))
+
+            # Bubble background & accent colored border
+            p.setPen(QtGui.QPen(accent_color, 1.5))
+            p.setBrush(QtGui.QColor(15, 23, 42, 245))
+            p.drawPath(unified_path)
+
+            # Text inside
             p.setPen(QtGui.QColor("#f8fafc"))
             p.drawText(
-                bubble_rect.adjusted(6, 3, -6, -3),
+                QtCore.QRectF(bx + 6, by + 4, bw - 12, bh - 8),
                 QtCore.Qt.AlignmentFlag.AlignCenter | QtCore.Qt.TextFlag.TextWordWrap,
                 self._speech_text,
             )
@@ -957,7 +1357,17 @@ class CharacterWidget(QtWidgets.QWidget):
             "QMenu::item:selected{background:#2563eb;}"
         )
         act_chat = menu.addAction(f"Chat with {self._config.character_name}")
+        act_greet = menu.addAction("Greet Me / Daily Topics")
         act_customize = menu.addAction("Customize Character & Persona...")
+        act_gallery = menu.addAction("Choose Character Avatar (Gallery)...")
+
+        avatar_menu = menu.addMenu("Switch Character Avatar")
+        for pid, preset in CHARACTER_PRESETS.items():
+            pa = avatar_menu.addAction(f"{preset.name} ({preset.category})")
+            pa.setCheckable(True)
+            pa.setChecked(self._config.character_id == pid and not self._config.sprite_path)
+            pa.triggered.connect(lambda _=False, p_id=pid: self.avatar_preset_requested.emit(p_id))
+
         act_sprite = menu.addAction("Choose Sprite Image / GIF...")
 
         size_menu = menu.addMenu("Character Size")
@@ -997,8 +1407,12 @@ class CharacterWidget(QtWidgets.QWidget):
         chosen = menu.exec(event.globalPos())
         if chosen == act_chat:
             self.clicked.emit()
+        elif chosen == act_greet:
+            self.greet_requested.emit()
         elif chosen == act_customize:
             self.open_settings_requested.emit()
+        elif chosen == act_gallery:
+            self.avatar_gallery_requested.emit()
         elif chosen == act_sprite:
             self._browse_sprite()
         elif chosen == act_clear_chat:
@@ -1044,6 +1458,211 @@ class CharacterWidget(QtWidgets.QWidget):
 
 
 # ============================================================
+# FLOW LAYOUT & FLOATING WAKE-UP GREETING BUBBLE
+# ============================================================
+
+class FlowLayout(QtWidgets.QLayout):
+    """Wrapping horizontal layout so topic pills never overflow narrow drawers."""
+
+    def __init__(self, parent: Optional[QtWidgets.QWidget] = None, margin: int = 0, h_spacing: int = 6, v_spacing: int = 5):
+        super().__init__(parent)
+        self._items: List[QtWidgets.QLayoutItem] = []
+        self._h_space = h_spacing
+        self._v_space = v_spacing
+        self.setContentsMargins(margin, margin, margin, margin)
+
+    def __del__(self) -> None:
+        while self._items:
+            self.takeAt(0)
+
+    def addItem(self, item: QtWidgets.QLayoutItem) -> None:  # noqa: N802
+        self._items.append(item)
+
+    def count(self) -> int:
+        return len(self._items)
+
+    def itemAt(self, index: int) -> Optional[QtWidgets.QLayoutItem]:  # noqa: N802
+        if 0 <= index < len(self._items):
+            return self._items[index]
+        return None
+
+    def takeAt(self, index: int) -> Optional[QtWidgets.QLayoutItem]:  # noqa: N802
+        if 0 <= index < len(self._items):
+            return self._items.pop(index)
+        return None
+
+    def expandingDirections(self) -> QtCore.Qt.Orientation:  # noqa: N802
+        return QtCore.Qt.Orientation(0)
+
+    def hasHeightForWidth(self) -> bool:  # noqa: N802
+        return True
+
+    def heightForWidth(self, width: int) -> int:  # noqa: N802
+        return self._do_layout(QtCore.QRect(0, 0, width, 0), test_only=True)
+
+    def setGeometry(self, rect: QtCore.QRect) -> None:  # noqa: N802
+        super().setGeometry(rect)
+        self._do_layout(rect, test_only=False)
+
+    def sizeHint(self) -> QtCore.QSize:  # noqa: N802
+        return self.minimumSize()
+
+    def minimumSize(self) -> QtCore.QSize:  # noqa: N802
+        size = QtCore.QSize()
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        m = self.contentsMargins()
+        size += QtCore.QSize(m.left() + m.right(), m.top() + m.bottom())
+        return size
+
+    def clear_widgets(self) -> None:
+        while self._items:
+            item = self.takeAt(0)
+            if item is not None:
+                w = item.widget()
+                if w is not None:
+                    w.setParent(None)
+                    w.deleteLater()
+
+    def _do_layout(self, rect: QtCore.QRect, test_only: bool) -> int:
+        m = self.contentsMargins()
+        eff = rect.adjusted(m.left(), m.top(), -m.right(), -m.bottom())
+        x = eff.x()
+        y = eff.y()
+        line_h = 0
+        for item in self._items:
+            w = item.widget()
+            if w is not None and w.isHidden():
+                continue
+            hint = item.sizeHint()
+            next_x = x + hint.width() + self._h_space
+            if line_h > 0 and next_x - self._h_space > eff.right():
+                x = eff.x()
+                y += line_h + self._v_space
+                next_x = x + hint.width() + self._h_space
+                line_h = 0
+            if not test_only:
+                item.setGeometry(QtCore.QRect(QtCore.QPoint(x, y), hint))
+            x = next_x
+            line_h = max(line_h, hint.height())
+        return (y + line_h - rect.y()) + m.bottom()
+
+
+class WakeupBubbleWidget(QtWidgets.QWidget):
+    """Frameless floating wake-up bubble visible even when the pet sprite is small (< 115px)."""
+
+    chat_requested = QtCore.Signal()
+    dismissed = QtCore.Signal()
+
+    def __init__(self, character_name: str = "Lumi"):
+        super().__init__(
+            None,
+            QtCore.Qt.WindowType.FramelessWindowHint
+            | QtCore.Qt.WindowType.WindowStaysOnTopHint
+            | QtCore.Qt.WindowType.Tool,
+        )
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+
+        self._card = QtWidgets.QFrame()
+        self._card.setObjectName("wakeupBubbleCard")
+        self._card.setStyleSheet(
+            """
+            #wakeupBubbleCard {
+                background: #0f172a;
+                border: 1.5px solid #38bdf8;
+                border-radius: 12px;
+            }
+            QLabel { color: #e2e8f0; background: transparent; border: none; }
+            QPushButton#bubbleCloseBtn {
+                background: #1e293b;
+                color: #94a3b8;
+                border: 1px solid #334155;
+                border-radius: 9px;
+                font-size: 11px;
+                font-weight: 700;
+                padding: 0px;
+            }
+            QPushButton#bubbleCloseBtn:hover { background: #334155; color: #f8fafc; }
+            """
+        )
+        self._card.setMaximumWidth(270)
+        outer.addWidget(self._card)
+
+        col = QtWidgets.QVBoxLayout(self._card)
+        col.setContentsMargins(10, 8, 10, 8)
+        col.setSpacing(4)
+
+        top = QtWidgets.QHBoxLayout()
+        top.setSpacing(6)
+        self._title_lbl = QtWidgets.QLabel(f"{character_name or 'Lumi'} · Ready")
+        self._title_lbl.setStyleSheet("color:#38bdf8;font-size:11px;font-weight:700;")
+        close_btn = QtWidgets.QPushButton("×")
+        close_btn.setObjectName("bubbleCloseBtn")
+        close_btn.setFixedSize(18, 18)
+        close_btn.setCursor(QtCore.Qt.CursorShape.ArrowCursor)
+        close_btn.clicked.connect(self.dismiss_bubble)
+        top.addWidget(self._title_lbl, 1)
+        top.addWidget(close_btn)
+        col.addLayout(top)
+
+        self._msg_lbl = QtWidgets.QLabel("")
+        self._msg_lbl.setWordWrap(True)
+        self._msg_lbl.setMaximumWidth(246)
+        self._msg_lbl.setStyleSheet("color:#f8fafc;font-size:12px;line-height:1.35;")
+        col.addWidget(self._msg_lbl)
+
+        self._hint_lbl = QtWidgets.QLabel("Click to open chat & daily topics")
+        self._hint_lbl.setStyleSheet("color:#93c5fd;font-size:10px;")
+        col.addWidget(self._hint_lbl)
+
+        self._hide_timer = QtCore.QTimer(self)
+        self._hide_timer.setSingleShot(True)
+        self._hide_timer.timeout.connect(self.dismiss_bubble)
+
+    def set_character_name(self, name: str) -> None:
+        self._title_lbl.setText(f"{(name or 'Lumi').strip() or 'Lumi'} · Ready")
+
+    def show_for_character(self, char_geo: QtCore.QRect, text: str, duration_ms: int = 12000) -> None:
+        self._msg_lbl.setText((text or "").strip())
+        self.adjustSize()
+        self.reposition_near(char_geo)
+        self.show()
+        self.raise_()
+        self._hide_timer.start(max(1500, int(duration_ms)))
+
+    def reposition_near(self, char_geo: QtCore.QRect) -> None:
+        screen = QtGui.QGuiApplication.screenAt(char_geo.center()) or QtGui.QGuiApplication.primaryScreen()
+        avail = screen.availableGeometry() if screen else QtCore.QRect(0, 0, 1280, 720)
+        bw, bh = max(self.width(), self.sizeHint().width()), max(self.height(), self.sizeHint().height())
+        if char_geo.center().x() > avail.center().x():
+            bx = char_geo.left() - bw - 8
+        else:
+            bx = char_geo.right() + 8
+        bx = max(avail.left() + 8, min(avail.right() - bw - 8, bx))
+        by = max(avail.top() + 8, min(avail.bottom() - bh - 8, char_geo.center().y() - bh // 2))
+        self.move(bx, by)
+
+    def dismiss_bubble(self) -> None:
+        self._hide_timer.stop()
+        self.hide()
+        self.dismissed.emit()
+
+    def mouseReleaseEvent(self, event: QtGui.QMouseEvent) -> None:  # noqa: N802
+        if event.button() == QtCore.Qt.MouseButton.LeftButton:
+            self._hide_timer.stop()
+            self.hide()
+            self.chat_requested.emit()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+
+# ============================================================
 # CHAT POPUP DRAWER
 # ============================================================
 
@@ -1067,6 +1686,7 @@ class ChatPopupWindow(QtWidgets.QWidget):
     mock_mode_requested = QtCore.Signal()
     provider_switch_requested = QtCore.Signal(str, str)
     enable_web_tools_requested = QtCore.Signal()
+    briefing_requested = QtCore.Signal()
 
     def __init__(self, config: CharacterConfig):
         super().__init__(
@@ -1083,6 +1703,9 @@ class ChatPopupWindow(QtWidgets.QWidget):
         self._drag_offset: Optional[QtCore.QPoint] = None
         self._streaming_bubble: Optional[QtWidgets.QTextBrowser] = None
         self._streaming_text = ""
+        self._wake_card: Optional[QtWidgets.QFrame] = None
+        self._wake_briefing_browser: Optional[QtWidgets.QTextBrowser] = None
+        self._files_chip: Optional[QtWidgets.QPushButton] = None
 
         self._build_ui()
         self.apply_config(config)
@@ -1096,45 +1719,68 @@ class ChatPopupWindow(QtWidgets.QWidget):
         self._frame.setStyleSheet(
             """
             #popupFrame {
-                background: #0f172a;
-                border: 1.5px solid #334155;
-                border-radius: 14px;
+                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 rgba(15, 23, 42, 0.96), stop:1 rgba(10, 15, 30, 0.98));
+                border: 1.5px solid rgba(56, 189, 248, 0.35);
+                border-radius: 18px;
             }
             QLabel { color: #e2e8f0; }
             QPushButton {
-                background: #1e293b;
+                background: rgba(30, 41, 59, 0.75);
                 color: #e2e8f0;
-                border: 1px solid #334155;
-                border-radius: 7px;
-                padding: 4px 7px;
+                border: 1px solid rgba(51, 65, 85, 0.8);
+                border-radius: 8px;
+                padding: 4px 8px;
                 font-size: 11px;
                 font-weight: 600;
             }
-            QPushButton:hover { background: #334155; }
+            QPushButton:hover { background: rgba(51, 65, 85, 0.95); border-color: #38bdf8; }
             QPushButton#sendBtn {
-                background: #2563eb;
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #2563eb, stop:1 #38bdf8);
                 border: none;
                 color: #ffffff;
-                padding: 7px 14px;
+                padding: 7px 16px;
+                border-radius: 9px;
                 font-size: 12px;
+                font-weight: bold;
             }
-            QPushButton#sendBtn:hover { background: #1d4ed8; }
+            QPushButton#sendBtn:hover { background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #1d4ed8, stop:1 #0284c7); }
             QPushButton#stopBtn {
-                background: #dc2626;
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #dc2626, stop:1 #f87171);
                 border: none;
                 color: #ffffff;
-                padding: 7px 14px;
+                padding: 7px 16px;
+                border-radius: 9px;
                 font-size: 12px;
+                font-weight: bold;
             }
             QPlainTextEdit {
-                background: #111827;
+                background: rgba(11, 17, 32, 0.85);
                 color: #f8fafc;
-                border: 1px solid #334155;
-                border-radius: 10px;
-                padding: 8px;
+                border: 1.5px solid #334155;
+                border-radius: 12px;
+                padding: 10px 12px;
                 font-size: 13px;
             }
+            QPlainTextEdit:focus {
+                border: 1.5px solid #38bdf8;
+            }
             QScrollArea { border: none; background: transparent; }
+            QScrollBar:vertical {
+                background: transparent;
+                width: 6px;
+                margin: 0;
+            }
+            QScrollBar::handle:vertical {
+                background: rgba(148, 163, 184, 0.35);
+                border-radius: 3px;
+                min-height: 24px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: rgba(56, 189, 248, 0.65);
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0px;
+            }
             """
         )
         outer.addWidget(self._frame)
@@ -1148,16 +1794,25 @@ class ChatPopupWindow(QtWidgets.QWidget):
         self._header.setCursor(QtCore.Qt.CursorShape.SizeAllCursor)
         hbox = QtWidgets.QHBoxLayout(self._header)
         hbox.setContentsMargins(0, 0, 0, 4)
-        hbox.setSpacing(5)
+        hbox.setSpacing(6)
 
         self._avatar_lbl = QtWidgets.QLabel()
-        self._avatar_lbl.setFixedSize(34, 34)
+        self._avatar_lbl.setFixedSize(36, 36)
+        self._avatar_lbl.setStyleSheet("border-radius:18px;border:1.5px solid #38bdf8;padding:1px;background:#111827;")
         hbox.addWidget(self._avatar_lbl)
 
         title_col = QtWidgets.QVBoxLayout()
-        title_col.setSpacing(0)
+        title_col.setSpacing(1)
         self._name_lbl = QtWidgets.QLabel("Lumi")
         self._name_lbl.setStyleSheet("font-size: 14px; font-weight: 700; color: #f8fafc;")
+
+        status_row = QtWidgets.QHBoxLayout()
+        status_row.setSpacing(5)
+        self._status_dot = QtWidgets.QLabel()
+        self._status_dot.setFixedSize(8, 8)
+        self._status_dot.setStyleSheet("border-radius:4px;background:#22c55e;")
+        status_row.addWidget(self._status_dot)
+
         self._status_lbl = QtWidgets.QLabel("Ready")
         self._status_lbl.setStyleSheet("font-size: 11px; color: #94a3b8;")
         self._status_lbl.setWordWrap(True)
@@ -1165,8 +1820,9 @@ class ChatPopupWindow(QtWidgets.QWidget):
             QtWidgets.QSizePolicy.Policy.Ignored,
             QtWidgets.QSizePolicy.Policy.Preferred,
         )
+        status_row.addWidget(self._status_lbl, 1)
         title_col.addWidget(self._name_lbl)
-        title_col.addWidget(self._status_lbl)
+        title_col.addLayout(status_row)
         hbox.addLayout(title_col, 1)
 
         self._pin_btn = QtWidgets.QPushButton("Pin")
@@ -1186,9 +1842,22 @@ class ChatPopupWindow(QtWidgets.QWidget):
 
         close_btn = QtWidgets.QPushButton("×")
         close_btn.setFixedWidth(24)
-        close_btn.clicked.connect(self.hide)
+        close_btn.clicked.connect(self.hide_animated)
         hbox.addWidget(close_btn)
         root.addWidget(self._header)
+
+        # Floating toast notification (e.g. "Code copied!")
+        self._toast_lbl = QtWidgets.QLabel()
+        self._toast_lbl.setStyleSheet(
+            "background:rgba(37,99,235,0.94);color:#ffffff;font-size:11px;font-weight:bold;"
+            "padding:4px 10px;border-radius:6px;border:1px solid #60a5fa;"
+        )
+        self._toast_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self._toast_lbl.setVisible(False)
+        self._toast_timer = QtCore.QTimer(self)
+        self._toast_timer.setSingleShot(True)
+        self._toast_timer.timeout.connect(lambda: self._toast_lbl.setVisible(False))
+        root.addWidget(self._toast_lbl)
 
         # Missing API key banner
         self._key_banner = QtWidgets.QFrame()
@@ -1295,31 +1964,12 @@ class ChatPopupWindow(QtWidgets.QWidget):
         self._render_timer.setInterval(40)
         self._render_timer.timeout.connect(self._flush_streaming_markdown)
 
-        # Quick suggestion chips
-        chips_row = QtWidgets.QHBoxLayout()
-        chips_row.setSpacing(6)
-        self._files_chip: Optional[QtWidgets.QPushButton] = None
-        for label, prompt in [
-            ("Weather", "What is today's weather in Chennai?"),
-            ("Search", "Search the web for the latest tech breakthroughs today."),
-            ("Gold", "What is today's gold rate in India?"),
-            ("News", "What is the latest tech news?"),
-            ("Time", "What date and time is it?"),
-            ("Files", "List all my PC drives and allowed folders."),
-        ]:
-            btn = QtWidgets.QPushButton(label)
-            btn.setStyleSheet(
-                "QPushButton{background:#162033;color:#93c5fd;border:1px solid #1e3a8a;"
-                "border-radius:12px;padding:3px 9px;font-size:11px;}"
-                "QPushButton:hover{background:#1e3a8a;color:#fff;}"
-            )
-            btn.clicked.connect(lambda _=False, p=prompt: self._submit_text(p))
-            chips_row.addWidget(btn)
-            if label == "Files":
-                btn.setVisible(bool(self._config.enable_system_tools))
-                self._files_chip = btn
-        chips_row.addStretch(1)
-        root.addLayout(chips_row)
+        # Quick suggestion chips (wrapping FlowLayout backed by custom_topics + Files)
+        self._chips_host = QtWidgets.QWidget()
+        self._chips_host.setStyleSheet("background: transparent;")
+        self._chips_layout = FlowLayout(self._chips_host, margin=0, h_spacing=6, v_spacing=5)
+        self._rebuild_topic_chips(self._config)
+        root.addWidget(self._chips_host)
 
         # Input row
         input_row = QtWidgets.QHBoxLayout()
@@ -1357,6 +2007,50 @@ class ChatPopupWindow(QtWidgets.QWidget):
         self._quota_banner.setVisible(False)
         self.provider_switch_requested.emit(provider, model)
 
+    @staticmethod
+    def _make_topic_pill(label: str, prompt: str, on_click, accent: bool = False) -> QtWidgets.QPushButton:
+        btn = QtWidgets.QPushButton(label)
+        if accent:
+            btn.setStyleSheet(
+                "QPushButton{background:#1d4ed8;color:#f8fafc;border:1px solid #3b82f6;"
+                "border-radius:12px;padding:3px 10px;font-size:11px;font-weight:700;}"
+                "QPushButton:hover{background:#2563eb;color:#ffffff;}"
+            )
+        else:
+            btn.setStyleSheet(
+                "QPushButton{background:#162033;color:#93c5fd;border:1px solid #1e3a8a;"
+                "border-radius:12px;padding:3px 9px;font-size:11px;}"
+                "QPushButton:hover{background:#1e3a8a;color:#fff;}"
+            )
+        btn.clicked.connect(lambda _=False, p=prompt: on_click(p))
+        return btn
+
+    def _rebuild_topic_chips(self, config: CharacterConfig, force: bool = False) -> None:
+        greeting_data = build_wake_greeting_data(config)
+        sig = (
+            tuple((t["label"], t["prompt"]) for t in greeting_data["topics"]),
+            bool(config.enable_system_tools),
+        )
+        if not force and getattr(self, "_chips_signature", None) == sig and self._files_chip is not None:
+            self._files_chip.setVisible(bool(config.enable_system_tools))
+            return
+        self._chips_signature = sig
+        self._chips_layout.clear_widgets()
+        self._files_chip = None
+        for topic in greeting_data["topics"]:
+            self._chips_layout.addWidget(
+                self._make_topic_pill(topic["label"], topic["prompt"], self._submit_text)
+            )
+        files_btn = self._make_topic_pill(
+            "Files",
+            "List all my PC drives and allowed folders.",
+            self._submit_text,
+        )
+        files_btn.setVisible(bool(config.enable_system_tools))
+        self._files_chip = files_btn
+        self._chips_layout.addWidget(files_btn)
+        self._chips_host.updateGeometry()
+
     def apply_config(self, config: CharacterConfig) -> None:
         self._config = config
         self._name_lbl.setText(config.character_name or "Lumi")
@@ -1370,10 +2064,16 @@ class ChatPopupWindow(QtWidgets.QWidget):
             pc_badge = ""
         self._status_lbl.setText(f"{config.provider} · {model}{web_badge}{pc_badge}")
         self._tools_off_banner.setVisible(not bool(config.use_tools))
-        if self._files_chip is not None:
-            self._files_chip.setVisible(bool(config.enable_system_tools))
-        self._avatar_lbl.setPixmap(draw_pet_pixmap(34, config.sprite_path))
+        self._rebuild_topic_chips(config)
+        self._avatar_lbl.setPixmap(draw_pet_pixmap(34, config.sprite_path, config.character_id))
+        preset = get_character_preset(config.character_id)
+        self._avatar_lbl.setStyleSheet(f"border-radius:18px;border:1.5px solid {preset.accent_color};padding:1px;background:#111827;")
         needs_key = chatbot.requires_api_key(config.provider) and not chatbot.resolve_api_key(config.provider)
+        if hasattr(self, "_status_dot"):
+            if needs_key:
+                self._status_dot.setStyleSheet("border-radius:4px;background:#f59e0b;")
+            else:
+                self._status_dot.setStyleSheet("border-radius:4px;background:#22c55e;")
         if needs_key:
             self._key_banner_lbl.setText(f"API key not set for {config.provider}")
         self._key_banner.setVisible(needs_key)
@@ -1386,13 +2086,159 @@ class ChatPopupWindow(QtWidgets.QWidget):
     def set_streaming(self, active: bool) -> None:
         self._send_btn.setVisible(not active)
         self._stop_btn.setVisible(active)
+        if hasattr(self, "_status_dot"):
+            if active:
+                self._status_dot.setStyleSheet("border-radius:4px;background:#38bdf8;")
+            else:
+                needs_key = chatbot.requires_api_key(self._config.provider) and not chatbot.resolve_api_key(self._config.provider)
+                if needs_key:
+                    self._status_dot.setStyleSheet("border-radius:4px;background:#f59e0b;")
+                else:
+                    self._status_dot.setStyleSheet("border-radius:4px;background:#22c55e;")
         if not active:
             self.apply_config(self._config)
 
+    def show_animated(self) -> None:
+        """Show with smooth fade-in animation."""
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_ShowWithoutActivating, False)
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        self.focus_input()
+        if not hasattr(self, "_opacity_effect") or self._opacity_effect is None:
+            self._opacity_effect = QtWidgets.QGraphicsOpacityEffect(self)
+            self.setGraphicsEffect(self._opacity_effect)
+        self._anim = QtCore.QPropertyAnimation(self._opacity_effect, b"opacity")
+        self._anim.setDuration(160)
+        self._anim.setStartValue(0.0)
+        self._anim.setEndValue(1.0)
+        self._anim.setEasingCurve(QtCore.QEasingCurve.Type.OutCubic)
+        self._anim.start()
+
+    def hide_animated(self) -> None:
+        """Hide with smooth fade-out animation."""
+        if not self.isVisible():
+            return
+        if not hasattr(self, "_opacity_effect") or self._opacity_effect is None:
+            self._opacity_effect = QtWidgets.QGraphicsOpacityEffect(self)
+            self.setGraphicsEffect(self._opacity_effect)
+        self._anim = QtCore.QPropertyAnimation(self._opacity_effect, b"opacity")
+        self._anim.setDuration(130)
+        self._anim.setStartValue(1.0)
+        self._anim.setEndValue(0.0)
+        self._anim.setEasingCurve(QtCore.QEasingCurve.Type.InQuad)
+        self._anim.finished.connect(
+            lambda: self.hide() if (hasattr(self, "_opacity_effect") and self._opacity_effect.opacity() == 0.0) else None
+        )
+        self._anim.start()
+
+    def show_passive(self) -> None:
+        """Show the chat popup on startup/resume without stealing keyboard focus."""
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self.show()
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_ShowWithoutActivating, False)
+
     def focus_input(self) -> None:
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_ShowWithoutActivating, False)
         self.raise_()
         self.activateWindow()
         self._input.setFocus()
+
+    def _remove_wake_card(self) -> None:
+        if self._wake_card is not None:
+            self._msg_layout.removeWidget(self._wake_card)
+            self._wake_card.deleteLater()
+            self._wake_card = None
+        self._wake_briefing_browser = None
+
+    def show_wake_greeting(
+        self,
+        greeting_data: Dict[str, Any],
+        include_briefing_placeholder: bool = False,
+    ) -> None:
+        """Render or refresh the interactive visual wake-up greeting card without altering LLM history."""
+        self._remove_wake_card()
+
+        card = QtWidgets.QFrame()
+        card.setObjectName("wakeGreetingCard")
+        card.setStyleSheet(
+            "#wakeGreetingCard{background:#111c33;border:1.5px solid #2563eb;"
+            "border-radius:12px;}"
+        )
+        col = QtWidgets.QVBoxLayout(card)
+        col.setContentsMargins(11, 9, 11, 9)
+        col.setSpacing(6)
+
+        title_lbl = QtWidgets.QLabel(str(greeting_data.get("headline") or "Hello! How can I assist you?"))
+        title_lbl.setWordWrap(True)
+        title_lbl.setStyleSheet("color:#f8fafc;font-size:13px;font-weight:700;background:transparent;")
+        col.addWidget(title_lbl)
+
+        sub_lbl = QtWidgets.QLabel(str(greeting_data.get("question") or "Pick a topic or ask anything below:"))
+        sub_lbl.setWordWrap(True)
+        sub_lbl.setStyleSheet("color:#cbd5e1;font-size:12px;background:transparent;")
+        col.addWidget(sub_lbl)
+
+        pills_host = QtWidgets.QWidget()
+        pills_host.setStyleSheet("background: transparent;")
+        pills_flow = FlowLayout(pills_host, margin=0, h_spacing=6, v_spacing=5)
+        for topic in greeting_data.get("topics") or []:
+            pills_flow.addWidget(
+                self._make_topic_pill(str(topic["label"]), str(topic["prompt"]), self._submit_text)
+            )
+        if self._config.enable_system_tools:
+            pills_flow.addWidget(
+                self._make_topic_pill(
+                    "My Drives & Files",
+                    "List all my PC drives and summarize my folders.",
+                    self._submit_text,
+                )
+            )
+        briefing_btn = QtWidgets.QPushButton("Get Live Briefing")
+        briefing_btn.setStyleSheet(
+            "QPushButton{background:#0f766e;color:#f0fdfa;border:1px solid #14b8a6;"
+            "border-radius:12px;padding:3px 10px;font-size:11px;font-weight:700;}"
+            "QPushButton:hover{background:#0d9488;color:#ffffff;}"
+        )
+        briefing_btn.clicked.connect(self.briefing_requested.emit)
+        pills_flow.addWidget(briefing_btn)
+        col.addWidget(pills_host)
+
+        briefing_browser = QtWidgets.QTextBrowser()
+        briefing_browser.setOpenExternalLinks(True)
+        briefing_browser.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        briefing_browser.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        briefing_browser.setWordWrapMode(QtGui.QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+        briefing_browser.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
+        briefing_browser.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        briefing_browser.setStyleSheet(
+            "QTextBrowser{background:#0f172a;color:#e2e8f0;border:1px solid #334155;"
+            "border-radius:8px;padding:6px 8px;font-size:12px;}"
+        )
+        briefing_browser.setVisible(False)
+        col.addWidget(briefing_browser)
+
+        self._wake_card = card
+        self._wake_briefing_browser = briefing_browser
+        self._insert_widget(card)
+        if include_briefing_placeholder:
+            self.set_wake_briefing_loading()
+
+    def set_wake_briefing_loading(self) -> None:
+        if self._wake_briefing_browser is None:
+            return
+        self._wake_briefing_browser.setVisible(True)
+        self._wake_briefing_browser.setHtml("<i>Fetching today's live briefing across your topics...</i>")
+        self._sync_browser_height(self._wake_briefing_browser)
+        self._scroll_to_bottom()
+
+    def set_wake_briefing_markdown(self, markdown_text: str) -> None:
+        if self._wake_briefing_browser is None:
+            return
+        self._wake_briefing_browser.setVisible(True)
+        self._wake_briefing_browser.setHtml(markdown_to_qt_html(markdown_text))
+        self._sync_browser_height(self._wake_briefing_browser)
+        self._scroll_to_bottom()
 
     def clear_messages(self) -> None:
         self._render_timer.stop()
@@ -1401,6 +2247,8 @@ class ChatPopupWindow(QtWidgets.QWidget):
             w = item.widget()
             if w is not None:
                 w.deleteLater()
+        self._wake_card = None
+        self._wake_briefing_browser = None
         self._streaming_bubble = None
         self._streaming_text = ""
         self._quota_banner.setVisible(False)
@@ -1423,8 +2271,10 @@ class ChatPopupWindow(QtWidgets.QWidget):
         lbl.setMaximumWidth(332)
         lbl.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
         lbl.setStyleSheet(
-            "background:#2563eb;color:#ffffff;padding:8px 12px;"
-            "border-radius:12px;font-size:13px;"
+            "background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #2563eb, stop:1 #1d4ed8);"
+            "color: #ffffff; padding: 9px 13px; border-radius: 14px;"
+            "border-bottom-right-radius: 3px; font-size: 13px;"
+            "border: 1px solid rgba(255, 255, 255, 0.12);"
         )
         row.addWidget(lbl)
         self._insert_widget(wrap)
@@ -1433,21 +2283,48 @@ class ChatPopupWindow(QtWidgets.QWidget):
         self._quota_banner.setVisible(False)
         self._streaming_text = ""
         browser = QtWidgets.QTextBrowser()
-        browser.setOpenExternalLinks(True)
+        browser.setOpenExternalLinks(False)
+        browser.anchorClicked.connect(self._on_browser_anchor_clicked)
         browser.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         browser.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         browser.setWordWrapMode(QtGui.QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
         browser.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
         browser.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
         browser.setStyleSheet(
-            "QTextBrowser{background:#1e293b;color:#e2e8f0;border:1px solid #334155;"
-            "border-radius:12px;padding:8px 10px;font-size:13px;}"
+            "QTextBrowser{background:rgba(30, 41, 59, 0.88);color:#f1f5f9;border:1px solid rgba(51, 65, 85, 0.7);"
+            "border-radius:14px;border-bottom-left-radius:3px;padding:9px 12px;font-size:13px;}"
         )
-        browser.setHtml("<i>Thinking...</i>")
+        preset = get_character_preset(self._config.character_id)
+        accent = preset.accent_color
+        browser.setHtml(
+            f"<span style='color:{accent};font-size:14px;'>●</span> "
+            f"<span style='color:{accent};font-size:14px;'>●</span> "
+            f"<span style='color:{accent};font-size:14px;'>●</span> "
+            f"<i style='color:#94a3b8;margin-left:6px;font-size:12px;'>Thinking...</i>"
+        )
         browser.document().setTextWidth(330)
         self._streaming_bubble = browser
         self._insert_widget(browser)
         self._sync_browser_height(browser)
+
+    def _on_browser_anchor_clicked(self, url: QtCore.QUrl) -> None:
+        url_str = url.toString()
+        if url_str.startswith("copy:"):
+            encoded = url_str[5:]
+            try:
+                raw = base64.b64decode(encoded.encode("ascii")).decode("utf-8")
+                QtGui.QGuiApplication.clipboard().setText(raw)
+                self.show_toast("Code copied to clipboard!")
+            except Exception:
+                pass
+            return
+        QtGui.QDesktopServices.openUrl(url)
+
+    def show_toast(self, text: str, duration_ms: int = 2200) -> None:
+        if hasattr(self, "_toast_lbl"):
+            self._toast_lbl.setText(text)
+            self._toast_lbl.setVisible(True)
+            self._toast_timer.start(duration_ms)
 
     def _flush_streaming_markdown(self) -> None:
         if self._streaming_bubble is None:
@@ -1859,7 +2736,357 @@ class CustomApiEditorDialog(QtWidgets.QDialog):
         return False
 
 
+class TopicEditorDialog(QtWidgets.QDialog):
+    """Modal editor to add or customize a daily wake-up & quick-chip topic."""
+
+    _KIND_CHOICES: Tuple[Tuple[str, str], ...] = (
+        ("news", "News Headlines (Google News RSS / NewsAPI)"),
+        ("gold", "India Gold & Silver Rate"),
+        ("weather", "Live Weather Forecast"),
+        ("web_search", "Web Search (Tavily / DuckDuckGo)"),
+        ("custom_prompt", "Custom AI Prompt"),
+    )
+
+    def __init__(
+        self,
+        topic: Optional[Dict[str, Any]] = None,
+        parent: Optional[QtWidgets.QWidget] = None,
+    ):
+        super().__init__(parent)
+        self.setWindowTitle("Edit Topic" if topic else "Add Custom Topic")
+        self.setMinimumWidth(440)
+        self.setStyleSheet(_DARK_DIALOG_QSS)
+        self._existing_id = str((topic or {}).get("id") or "").strip()
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(10)
+
+        form = QtWidgets.QFormLayout()
+        form.setHorizontalSpacing(10)
+        form.setVerticalSpacing(8)
+        form.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+
+        self._label_edit = QtWidgets.QLineEdit(str((topic or {}).get("label") or ""))
+        self._label_edit.setPlaceholderText("e.g., Tech Field, Cinema, Cricket, Stocks")
+        form.addRow("Topic Label:", self._label_edit)
+
+        self._kind_combo = QtWidgets.QComboBox()
+        for kind_id, kind_label in self._KIND_CHOICES:
+            self._kind_combo.addItem(kind_label, kind_id)
+        cur_kind = str((topic or {}).get("kind") or "news")
+        idx = self._kind_combo.findData(cur_kind)
+        if idx >= 0:
+            self._kind_combo.setCurrentIndex(idx)
+        self._kind_combo.currentIndexChanged.connect(self._update_query_placeholder)
+        form.addRow("Source / Type:", self._kind_combo)
+
+        self._query_edit = QtWidgets.QLineEdit(str((topic or {}).get("query") or ""))
+        form.addRow("Keyword / City:", self._query_edit)
+
+        self._prompt_edit = QtWidgets.QPlainTextEdit(str((topic or {}).get("prompt") or ""))
+        self._prompt_edit.setFixedHeight(72)
+        self._prompt_edit.setPlaceholderText(
+            "Optional custom question sent when clicked (supports {city}). Leave empty to auto-generate."
+        )
+        form.addRow("Click Prompt:", self._prompt_edit)
+
+        self._enabled_chk = QtWidgets.QCheckBox("Show in wake-up greeting & quick chat chips")
+        self._enabled_chk.setChecked(bool((topic or {}).get("enabled", True)))
+        form.addRow("", self._enabled_chk)
+
+        layout.addLayout(form)
+        self._update_query_placeholder()
+
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Ok | QtWidgets.QDialogButtonBox.StandardButton.Cancel
+        )
+        ok_btn = buttons.button(QtWidgets.QDialogButtonBox.StandardButton.Ok)
+        if ok_btn is not None:
+            ok_btn.setObjectName("primaryBtn")
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _update_query_placeholder(self) -> None:
+        kind = str(self._kind_combo.currentData() or "news")
+        placeholders = {
+            "news": "e.g., technology AI software, cinema movies, cricket",
+            "gold": "Optional note (uses live India gold & silver rates)",
+            "weather": "Optional city override (blank = use default Weather City)",
+            "web_search": "e.g., ISRO latest launch, Nifty 50 market today",
+            "custom_prompt": "Optional keyword for live briefing web search",
+        }
+        self._query_edit.setPlaceholderText(placeholders.get(kind, "Keyword or query"))
+
+    def _on_accept(self) -> None:
+        if not self._label_edit.text().strip():
+            QtWidgets.QMessageBox.warning(self, "Missing Label", "Please enter a topic label.")
+            self._label_edit.setFocus()
+            return
+        self.accept()
+
+    def build_topic(self) -> Dict[str, Any]:
+        raw = {
+            "id": self._existing_id,
+            "label": self._label_edit.text().strip(),
+            "kind": str(self._kind_combo.currentData() or "custom_prompt"),
+            "query": self._query_edit.text().strip(),
+            "prompt": self._prompt_edit.toPlainText().strip(),
+            "enabled": self._enabled_chk.isChecked(),
+        }
+        return _normalize_topic_entry(raw) or {
+            "id": "custom",
+            "label": "Custom Topic",
+            "kind": "custom_prompt",
+            "query": "",
+            "prompt": "",
+            "enabled": True,
+        }
+
+
+class CharacterPreviewWidget(QtWidgets.QWidget):
+    """Mini animated character preview that renders the live character at 30 FPS."""
+
+    def __init__(self, character_id: str, size: int = 76, parent: Optional[QtWidgets.QWidget] = None):
+        super().__init__(parent)
+        self._character_id = character_id
+        self._size = size
+        self.setFixedSize(size, size)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self._phase = 0.0
+        self._blinking = False
+        self._blink_ticks = random.randint(30, 90)
+        self._timer = QtCore.QTimer(self)
+        self._timer.timeout.connect(self._on_tick)
+        self._timer.start(33)
+
+    def _on_tick(self) -> None:
+        self._phase += 0.08
+        self._blink_ticks -= 1
+        if self._blink_ticks <= 0:
+            if self._blinking:
+                self._blinking = False
+                self._blink_ticks = random.randint(60, 150)
+            else:
+                self._blinking = True
+                self._blink_ticks = 4
+        self.update()
+
+    def set_character_id(self, character_id: str) -> None:
+        self._character_id = character_id
+        self.update()
+
+    def paintEvent(self, event: QtGui.QPaintEvent) -> None:  # noqa: N802
+        p = QtGui.QPainter(self)
+        p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+        p.setRenderHint(QtGui.QPainter.RenderHint.SmoothPixmapTransform)
+        rect = QtCore.QRectF(2, 2, self._size - 4, self._size - 4)
+        paint_animated_character(
+            self._character_id,
+            p,
+            rect,
+            phase=self._phase,
+            state="idle",
+            blinking=self._blinking,
+            look_x=0.0,
+            look_y=0.0,
+        )
+        p.end()
+
+
+class AvatarGalleryDialog(QtWidgets.QDialog):
+    """Visual gallery dialog for choosing animated character presets."""
+
+    def __init__(
+        self,
+        parent: Optional[QtWidgets.QWidget] = None,
+        current_character_id: str = "lumi",
+    ):
+        super().__init__(parent)
+        self.setWindowTitle("Choose Animated Character Avatar")
+        self.setMinimumSize(720, 520)
+        self.resize(760, 560)
+        self.setStyleSheet(
+            "QDialog{background:#0b1120;color:#f8fafc;}"
+            "QLabel{color:#f8fafc;}"
+            "QPushButton{background:#1e293b;color:#f8fafc;border:1px solid #334155;border-radius:6px;padding:6px 14px;font-size:12px;}"
+            "QPushButton:hover{background:#334155;border-color:#38bdf8;}"
+            "QPushButton:checked{background:#2563eb;border-color:#60a5fa;font-weight:bold;}"
+            "QScrollArea{background:transparent;border:none;}"
+        )
+
+        self._selected_id = current_character_id if current_character_id in CHARACTER_PRESETS else "lumi"
+        self._cards: Dict[str, QtWidgets.QFrame] = {}
+        self._category_buttons: Dict[str, QtWidgets.QPushButton] = {}
+        self._current_category = "All"
+
+        vbox = QtWidgets.QVBoxLayout(self)
+        vbox.setContentsMargins(16, 14, 16, 14)
+        vbox.setSpacing(12)
+
+        # Header title
+        header = QtWidgets.QHBoxLayout()
+        title_lbl = QtWidgets.QLabel("Animated Character Avatar Gallery")
+        title_lbl.setStyleSheet("font-size:16px;font-weight:bold;color:#38bdf8;")
+        header.addWidget(title_lbl)
+        header.addStretch(1)
+        sub_lbl = QtWidgets.QLabel("Live interactive characters with animations, expressions & catchphrases")
+        sub_lbl.setStyleSheet("font-size:12px;color:#94a3b8;")
+        header.addWidget(sub_lbl)
+        vbox.addLayout(header)
+
+        # Category filter bar
+        cat_bar = QtWidgets.QHBoxLayout()
+        cat_bar.setSpacing(8)
+        cat_bar.addWidget(QtWidgets.QLabel("Category:"))
+        self._cat_btn_group = QtWidgets.QButtonGroup(self)
+        for cat in list_character_categories():
+            btn = QtWidgets.QPushButton(cat)
+            btn.setCheckable(True)
+            if cat == "All":
+                btn.setChecked(True)
+            btn.clicked.connect(lambda _=False, c=cat: self._filter_category(c))
+            self._cat_btn_group.addButton(btn)
+            self._category_buttons[cat] = btn
+            cat_bar.addWidget(btn)
+        cat_bar.addStretch(1)
+        vbox.addLayout(cat_bar)
+
+        # Scrollable grid of character cards
+        scroll = QtWidgets.QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        container = QtWidgets.QWidget()
+        self._grid = QtWidgets.QGridLayout(container)
+        self._grid.setContentsMargins(4, 4, 4, 4)
+        self._grid.setSpacing(10)
+
+        self._build_cards()
+        scroll.setWidget(container)
+        vbox.addWidget(scroll, 1)
+
+        # Footer selection details & actions
+        footer = QtWidgets.QHBoxLayout()
+        footer.setSpacing(12)
+
+        self._status_lbl = QtWidgets.QLabel()
+        self._status_lbl.setStyleSheet("font-size:12px;color:#cbd5e1;")
+        footer.addWidget(self._status_lbl, 1)
+
+        self._persona_chk = QtWidgets.QCheckBox("Sync AI Persona to character personality")
+        self._persona_chk.setChecked(True)
+        self._persona_chk.setStyleSheet("color:#e2e8f0;font-size:12px;")
+        footer.addWidget(self._persona_chk)
+
+        cancel_btn = QtWidgets.QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        footer.addWidget(cancel_btn)
+
+        apply_btn = QtWidgets.QPushButton("Apply Character Avatar")
+        apply_btn.setStyleSheet("background:#2563eb;color:#ffffff;font-weight:bold;padding:7px 18px;")
+        apply_btn.clicked.connect(self.accept)
+        footer.addWidget(apply_btn)
+
+        vbox.addLayout(footer)
+        self._update_selection_ui()
+
+    def _build_cards(self) -> None:
+        for c in self._cards.values():
+            c.setParent(None)
+            c.deleteLater()
+        self._cards.clear()
+
+        row = 0
+        col = 0
+        max_cols = 3
+
+        for pid, preset in CHARACTER_PRESETS.items():
+            if self._current_category != "All" and preset.category != self._current_category:
+                continue
+
+            card = QtWidgets.QFrame()
+            card.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+            card.setFixedSize(225, 175)
+            card.setObjectName(f"card_{pid}")
+
+            cvbox = QtWidgets.QVBoxLayout(card)
+            cvbox.setContentsMargins(10, 10, 10, 10)
+            cvbox.setSpacing(6)
+
+            top_h = QtWidgets.QHBoxLayout()
+            top_h.setSpacing(8)
+            preview = CharacterPreviewWidget(pid, size=58, parent=card)
+            top_h.addWidget(preview)
+
+            meta_vbox = QtWidgets.QVBoxLayout()
+            meta_vbox.setSpacing(2)
+            name_lbl = QtWidgets.QLabel(preset.name)
+            name_lbl.setStyleSheet(f"font-size:13px;font-weight:bold;color:{preset.accent_color};")
+            meta_vbox.addWidget(name_lbl)
+
+            cat_pill = QtWidgets.QLabel(preset.category)
+            cat_pill.setStyleSheet("font-size:10px;color:#94a3b8;background:#1e293b;padding:2px 6px;border-radius:4px;")
+            meta_vbox.addWidget(cat_pill)
+            top_h.addLayout(meta_vbox, 1)
+            cvbox.addLayout(top_h)
+
+            if preset.theme_quote:
+                quote_lbl = QtWidgets.QLabel(f'"{preset.theme_quote}"')
+                quote_lbl.setWordWrap(True)
+                quote_lbl.setStyleSheet("font-size:11px;font-style:italic;color:#38bdf8;")
+                cvbox.addWidget(quote_lbl)
+
+            desc_lbl = QtWidgets.QLabel(preset.description)
+            desc_lbl.setWordWrap(True)
+            desc_lbl.setStyleSheet("font-size:10px;color:#94a3b8;")
+            cvbox.addWidget(desc_lbl, 1)
+
+            card.mousePressEvent = lambda e, p_id=pid: self._on_card_clicked(p_id)
+
+            self._grid.addWidget(card, row, col)
+            self._cards[pid] = card
+
+            col += 1
+            if col >= max_cols:
+                col = 0
+                row += 1
+
+    def _filter_category(self, cat: str) -> None:
+        self._current_category = cat
+        self._build_cards()
+        self._update_selection_ui()
+
+    def _on_card_clicked(self, pid: str) -> None:
+        self._selected_id = pid
+        self._update_selection_ui()
+
+    def _update_selection_ui(self) -> None:
+        selected_preset = get_character_preset(self._selected_id)
+        for pid, card in self._cards.items():
+            if pid == self._selected_id:
+                card.setStyleSheet(
+                    f"QFrame#card_{pid}{{background:#1e293b;border:2px solid {selected_preset.accent_color};border-radius:8px;}}"
+                )
+            else:
+                card.setStyleSheet(
+                    f"QFrame#card_{pid}{{background:#111827;border:1px solid #1f2937;border-radius:8px;}}"
+                    f"QFrame#card_{pid}:hover{{background:#1e293b;border-color:#475569;}}"
+                )
+
+        self._status_lbl.setText(
+            f"Selected: <b><font color='{selected_preset.accent_color}'>{selected_preset.name}</font></b> — {selected_preset.category}"
+        )
+
+    def get_selected_preset(self) -> Tuple[CharacterPreset, bool]:
+        """Return (selected_preset, sync_persona)."""
+        preset = get_character_preset(self._selected_id)
+        sync_persona = self._persona_chk.isChecked()
+        return preset, sync_persona
+
+
 class SettingsDialog(QtWidgets.QDialog):
+    preview_wake_requested = QtCore.Signal()
+
     def __init__(self, config: CharacterConfig, parent: Optional[QtWidgets.QWidget] = None):
         super().__init__(parent)
         self.setWindowTitle("Customize Desktop Character")
@@ -1872,6 +3099,8 @@ class SettingsDialog(QtWidgets.QDialog):
         self.setStyleSheet(_DARK_DIALOG_QSS)
 
         self._config = CharacterConfig(**asdict(config))
+        self._selected_character_id = self._config.character_id
+        self._topics_draft: List[Dict[str, Any]] = _resolved_topics(copy.deepcopy(self._config.custom_topics))
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(14, 12, 14, 12)
         layout.setSpacing(10)
@@ -1881,6 +3110,7 @@ class SettingsDialog(QtWidgets.QDialog):
         self._tabs.addTab(self._build_ai_keys_tab(), "AI && API Keys")
         self._tabs.addTab(self._build_pc_files_tab(), "PC && Files")
         self._tabs.addTab(self._build_apis_tab(), "APIs && Tools")
+        self._tabs.addTab(self._build_wake_topics_tab(), "Wake-Up && Topics")
         layout.addWidget(self._tabs, 1)
 
         buttons = QtWidgets.QDialogButtonBox(
@@ -1940,10 +3170,22 @@ class SettingsDialog(QtWidgets.QDialog):
         vbox.addWidget(persona_box)
 
         look_box, look_form = self._create_form_card("Appearance && Startup")
+        char_row = QtWidgets.QHBoxLayout()
+        char_row.setSpacing(8)
+        self._current_char_lbl = QtWidgets.QLabel()
+        self._update_char_preset_label()
+        gallery_btn = QtWidgets.QPushButton("Choose Character Avatar (Gallery)...")
+        gallery_btn.setStyleSheet("background:#2563eb;color:#ffffff;font-weight:bold;padding:5px 12px;")
+        gallery_btn.clicked.connect(self._open_avatar_gallery)
+        char_row.addWidget(self._current_char_lbl, 1)
+        char_row.addWidget(gallery_btn)
+        look_form.addRow("Character Avatar:", char_row)
+
         sprite_row = QtWidgets.QHBoxLayout()
         sprite_row.setSpacing(6)
         self._sprite_edit = QtWidgets.QLineEdit(self._config.sprite_path)
         self._sprite_edit.setPlaceholderText("Leave empty for built-in cute animated pet")
+        self._sprite_edit.textChanged.connect(lambda _: self._update_char_preset_label())
         browse_btn = QtWidgets.QPushButton("Browse...")
         browse_btn.clicked.connect(self._browse_sprite)
         reset_sprite_btn = QtWidgets.QPushButton("Default Pet")
@@ -2032,20 +3274,35 @@ class SettingsDialog(QtWidgets.QDialog):
         ai_form.addRow("", self._tools_chk)
         vbox.addWidget(ai_box)
 
-        keys_box, keys_form = self._create_form_card("API Keys (saved locally to .env)", vertical_spacing=5)
+        keys_box = QtWidgets.QGroupBox("API Keys (saved locally to .env)")
+        keys_grid = QtWidgets.QGridLayout(keys_box)
+        keys_grid.setContentsMargins(8, 6, 8, 6)
+        keys_grid.setHorizontalSpacing(10)
+        keys_grid.setVerticalSpacing(5)
+        keys_grid.setColumnStretch(1, 1)
+        keys_grid.setColumnStretch(3, 1)
         key_specs = (
-            ("_gemini_key_edit", "Gemini API Key:", chatbot.resolve_api_key("gemini"), "Paste GEMINI_API_KEY (saved to .env)"),
-            ("_groq_key_edit", "Groq API Key:", chatbot.resolve_api_key("groq"), "Paste GROQ_API_KEY (gsk_...) — free tier (console.groq.com)"),
-            ("_grok_key_edit", "Grok (xAI) Key:", chatbot.resolve_api_key("grok"), "Paste GROK_API_KEY / XAI_API_KEY (xai-..., console.x.ai)"),
-            ("_nvidia_key_edit", "NVIDIA API Key:", chatbot.resolve_api_key("nvidia"), "Paste NVIDIA_API_KEY (saved to .env)"),
-            ("_tavily_key_edit", "Tavily Search Key:", os.getenv("TAVILY_API_KEY"), "Paste TAVILY_API_KEY (tvly-...) for live web_search"),
+            ("_gemini_key_edit", "Gemini Key:", chatbot.resolve_api_key("gemini"), "GEMINI_API_KEY"),
+            ("_openai_key_edit", "OpenAI Key:", chatbot.resolve_api_key("openai"), "OPENAI_API_KEY (sk-...)"),
+            ("_deepseek_key_edit", "DeepSeek Key:", chatbot.resolve_api_key("deepseek"), "DEEPSEEK_API_KEY (sk-...)"),
+            ("_groq_key_edit", "Groq Key:", chatbot.resolve_api_key("groq"), "GROQ_API_KEY (gsk_...)"),
+            ("_grok_key_edit", "Grok (xAI):", chatbot.resolve_api_key("grok"), "GROK_API_KEY (xai-...)"),
+            ("_nvidia_key_edit", "NVIDIA Key:", chatbot.resolve_api_key("nvidia"), "NVIDIA_API_KEY"),
+            ("_tavily_key_edit", "Tavily Key:", os.getenv("TAVILY_API_KEY"), "TAVILY_API_KEY (tvly-...)"),
         )
-        for attr_name, label, existing_val, empty_hint in key_specs:
+        for idx, (attr_name, label, existing_val, empty_hint) in enumerate(key_specs):
             edit = QtWidgets.QLineEdit()
             edit.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password)
-            edit.setPlaceholderText("Configured (leave blank to keep)" if existing_val else empty_hint)
+            edit.setMinimumWidth(135)
+            edit.setPlaceholderText("Configured (blank = keep)" if existing_val else empty_hint)
             setattr(self, attr_name, edit)
-            keys_form.addRow(label, edit)
+            r, col_pair = divmod(idx, 2)
+            lbl = QtWidgets.QLabel(label)
+            keys_grid.addWidget(lbl, r, col_pair * 2)
+            keys_grid.addWidget(edit, r, col_pair * 2 + 1)
+        saved_hint = QtWidgets.QLabel("Masked locally · only entered keys are updated")
+        saved_hint.setStyleSheet("color:#94a3b8;font-size:11px;font-weight:400;")
+        keys_grid.addWidget(saved_hint, 3, 2, 1, 2)
         vbox.addWidget(keys_box)
         vbox.addStretch(1)
         return tab
@@ -2209,6 +3466,160 @@ class SettingsDialog(QtWidgets.QDialog):
         self._refresh_builtin_status()
         return tab
 
+    def _build_wake_topics_tab(self) -> QtWidgets.QWidget:
+        tab = QtWidgets.QWidget()
+        vbox = QtWidgets.QVBoxLayout(tab)
+        vbox.setContentsMargins(12, 8, 12, 8)
+        vbox.setSpacing(8)
+
+        wake_box = QtWidgets.QGroupBox("Wake-Up Greeting && Schedule")
+        wake_layout = QtWidgets.QVBoxLayout(wake_box)
+        wake_layout.setContentsMargins(8, 6, 8, 6)
+        wake_layout.setSpacing(5)
+
+        self._wake_enabled_chk = QtWidgets.QCheckBox("Greet me automatically when Lumi starts or wakes up")
+        self._wake_enabled_chk.setChecked(bool(self._config.wake_greeting_enabled))
+        wake_layout.addWidget(self._wake_enabled_chk)
+
+        self._wake_open_chat_chk = QtWidgets.QCheckBox(
+            "Also open interactive Chat Popup on startup (without stealing focus)"
+        )
+        self._wake_open_chat_chk.setChecked(bool(self._config.wake_open_chat))
+        wake_layout.addWidget(self._wake_open_chat_chk)
+
+        self._wake_resume_chk = QtWidgets.QCheckBox(
+            "Greet me again when Windows wakes from Sleep / Hibernate"
+        )
+        self._wake_resume_chk.setChecked(bool(self._config.wake_on_system_resume))
+        wake_layout.addWidget(self._wake_resume_chk)
+
+        self._wake_briefing_chk = QtWidgets.QCheckBox(
+            "Auto-fetch live headlines, weather & gold rate at wake-up (runs in background)"
+        )
+        self._wake_briefing_chk.setChecked(bool(self._config.wake_auto_fetch_briefing))
+        wake_layout.addWidget(self._wake_briefing_chk)
+
+        row1 = QtWidgets.QHBoxLayout()
+        row1.setSpacing(8)
+        row1.addWidget(QtWidgets.QLabel("Your Name:"))
+        self._wake_user_edit = QtWidgets.QLineEdit(self._config.wake_user_name)
+        self._wake_user_edit.setPlaceholderText("Optional (e.g., Alex)")
+        row1.addWidget(self._wake_user_edit, 1)
+
+        row1.addWidget(QtWidgets.QLabel("Weather City:"))
+        self._wake_city_edit = QtWidgets.QLineEdit(self._config.wake_weather_city)
+        self._wake_city_edit.setPlaceholderText("e.g., Chennai")
+        row1.addWidget(self._wake_city_edit, 1)
+        wake_layout.addLayout(row1)
+
+        row2 = QtWidgets.QHBoxLayout()
+        row2.setSpacing(8)
+        row2.addWidget(QtWidgets.QLabel("Resume Cooldown:"))
+        self._wake_cooldown_spin = QtWidgets.QSpinBox()
+        self._wake_cooldown_spin.setRange(1, 1440)
+        self._wake_cooldown_spin.setValue(int(self._config.wake_resume_cooldown_minutes))
+        self._wake_cooldown_spin.setSuffix(" min")
+        row2.addWidget(self._wake_cooldown_spin)
+        row2.addStretch(1)
+
+        preview_btn = QtWidgets.QPushButton("Preview Wake-Up Now")
+        preview_btn.setToolTip("Show the floating bubble and chat wake greeting right now")
+        preview_btn.clicked.connect(self.preview_wake_requested.emit)
+        row2.addWidget(preview_btn)
+        wake_layout.addLayout(row2)
+        vbox.addWidget(wake_box)
+
+        topics_box = QtWidgets.QGroupBox("Customizable Daily Topics (Shown in Greeting && Quick Chips)")
+        topics_layout = QtWidgets.QVBoxLayout(topics_box)
+        topics_layout.setContentsMargins(8, 6, 8, 6)
+        topics_layout.setSpacing(6)
+
+        self._topics_list = QtWidgets.QListWidget()
+        self._topics_list.setMinimumHeight(115)
+        self._topics_list.itemDoubleClicked.connect(lambda _item: self._edit_topic())
+        topics_layout.addWidget(self._topics_list, 1)
+
+        topic_btns = QtWidgets.QHBoxLayout()
+        topic_btns.setSpacing(5)
+        for caption, handler in (
+            ("Add...", self._add_topic),
+            ("Edit...", self._edit_topic),
+            ("Toggle ON/OFF", self._toggle_topic),
+            ("Remove", self._remove_topic),
+            ("Up", lambda: self._move_topic(-1)),
+            ("Down", lambda: self._move_topic(1)),
+            ("Reset Defaults", self._reset_default_topics),
+        ):
+            btn = QtWidgets.QPushButton(caption)
+            btn.clicked.connect(handler)
+            topic_btns.addWidget(btn)
+        topic_btns.addStretch(1)
+        topics_layout.addLayout(topic_btns)
+        vbox.addWidget(topics_box, 1)
+
+        self._refresh_topics_list()
+        return tab
+
+    def _refresh_topics_list(self, select_row: Optional[int] = None) -> None:
+        self._topics_list.clear()
+        for t in self._topics_draft:
+            tag = "ON" if t.get("enabled", True) else "OFF"
+            kind = str(t.get("kind") or "custom_prompt")
+            detail = str(t.get("query") or t.get("prompt") or "").strip()
+            suffix = f" — {detail[:48]}" if detail else ""
+            item = QtWidgets.QListWidgetItem(f"[{tag}] {t['label']} ({kind}){suffix}")
+            item.setData(QtCore.Qt.ItemDataRole.UserRole, t["id"])
+            self._topics_list.addItem(item)
+        if select_row is not None and 0 <= select_row < self._topics_list.count():
+            self._topics_list.setCurrentRow(select_row)
+
+    def _add_topic(self) -> None:
+        dlg = TopicEditorDialog(parent=self)
+        if dlg.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+            topic = dlg.build_topic()
+            self._topics_draft.append(topic)
+            self._topics_draft = _resolved_topics(self._topics_draft)
+            self._refresh_topics_list(select_row=len(self._topics_draft) - 1)
+
+    def _edit_topic(self) -> None:
+        row = self._topics_list.currentRow()
+        if row < 0 or row >= len(self._topics_draft):
+            return
+        dlg = TopicEditorDialog(topic=self._topics_draft[row], parent=self)
+        if dlg.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+            self._topics_draft[row] = dlg.build_topic()
+            self._topics_draft = _resolved_topics(self._topics_draft)
+            self._refresh_topics_list(select_row=min(row, len(self._topics_draft) - 1))
+
+    def _toggle_topic(self) -> None:
+        row = self._topics_list.currentRow()
+        if row < 0 or row >= len(self._topics_draft):
+            return
+        self._topics_draft[row]["enabled"] = not bool(self._topics_draft[row].get("enabled", True))
+        self._refresh_topics_list(select_row=row)
+
+    def _remove_topic(self) -> None:
+        row = self._topics_list.currentRow()
+        if row < 0 or row >= len(self._topics_draft):
+            return
+        self._topics_draft.pop(row)
+        self._refresh_topics_list(select_row=min(row, len(self._topics_draft) - 1))
+
+    def _move_topic(self, delta: int) -> None:
+        row = self._topics_list.currentRow()
+        target = row + delta
+        if row < 0 or target < 0 or target >= len(self._topics_draft):
+            return
+        self._topics_draft[row], self._topics_draft[target] = (
+            self._topics_draft[target],
+            self._topics_draft[row],
+        )
+        self._refresh_topics_list(select_row=target)
+
+    def _reset_default_topics(self) -> None:
+        self._topics_draft = default_custom_topics()
+        self._refresh_topics_list(select_row=0 if self._topics_draft else None)
+
     def _refresh_custom_apis_list(self) -> None:
         self._custom_apis_list.clear()
         for ep in api_tools.load_custom_apis():
@@ -2308,6 +3719,14 @@ class SettingsDialog(QtWidgets.QDialog):
             self._provider_hint_lbl.setText(
                 "Free tier tips: 'gemini-3.5-flash-lite' or 'gemma-4-31b-it' have higher daily limits than 3.8-flash."
             )
+        elif provider == "openai":
+            self._provider_hint_lbl.setText(
+                "OpenAI (api.openai.com, sk-... key at platform.openai.com) · Models: gpt-4.1-mini, gpt-4.1, gpt-5-mini, gpt-4o, o4-mini"
+            )
+        elif provider == "deepseek":
+            self._provider_hint_lbl.setText(
+                "DeepSeek (api.deepseek.com, sk-... key at platform.deepseek.com) · Models: deepseek-chat (V3), deepseek-reasoner (R1)"
+            )
         elif provider == "groq":
             self._provider_hint_lbl.setText(
                 "Free cloud tier (no credit card, gsk_... key) at console.groq.com · Models: openai/gpt-oss-120b, openai/gpt-oss-20b, qwen/qwen3.8-27b"
@@ -2361,6 +3780,27 @@ class SettingsDialog(QtWidgets.QDialog):
         self._populate_models(provider, selected_model=None, query_live=False)
         self._refresh_provider_hint(provider)
 
+    def _open_avatar_gallery(self) -> None:
+        dlg = AvatarGalleryDialog(self, current_character_id=self._selected_character_id)
+        if dlg.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+            preset, sync_persona = dlg.get_selected_preset()
+            self._selected_character_id = preset.id
+            self._name_edit.setText(preset.name)
+            self._sprite_edit.setText("")
+            if sync_persona and preset.personality_prompt:
+                self._persona_edit.setPlainText(preset.personality_prompt)
+            self._update_char_preset_label()
+
+    def _update_char_preset_label(self) -> None:
+        preset = get_character_preset(self._selected_character_id)
+        sprite_val = self._sprite_edit.text().strip() if hasattr(self, "_sprite_edit") else ""
+        if sprite_val:
+            self._current_char_lbl.setText(f"Custom Sprite ({Path(sprite_val).name})")
+        else:
+            self._current_char_lbl.setText(
+                f"<b><font color='{preset.accent_color}'>{preset.name}</font></b> ({preset.category})"
+            )
+
     def _browse_sprite(self) -> None:
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
             self,
@@ -2400,6 +3840,7 @@ class SettingsDialog(QtWidgets.QDialog):
 
     def updated_config(self) -> CharacterConfig:
         self._config.character_name = self._name_edit.text().strip() or "Lumi"
+        self._config.character_id = self._selected_character_id
         self._config.personality_prompt = (
             self._persona_edit.toPlainText().strip() or PERSONA_PRESETS["Cute Desktop Pet"]
         )
@@ -2420,6 +3861,14 @@ class SettingsDialog(QtWidgets.QDialog):
             for ln in self._allowed_dirs_edit.toPlainText().splitlines()
             if ln.strip()
         ] or system_tools.default_allowed_dir_strings()
+        self._config.wake_greeting_enabled = self._wake_enabled_chk.isChecked()
+        self._config.wake_open_chat = self._wake_open_chat_chk.isChecked()
+        self._config.wake_on_system_resume = self._wake_resume_chk.isChecked()
+        self._config.wake_auto_fetch_briefing = self._wake_briefing_chk.isChecked()
+        self._config.wake_user_name = self._wake_user_edit.text().strip()
+        self._config.wake_weather_city = self._wake_city_edit.text().strip() or "Chennai"
+        self._config.wake_resume_cooldown_minutes = int(self._wake_cooldown_spin.value())
+        self._config.custom_topics = _resolved_topics(copy.deepcopy(self._topics_draft))
         return self._config
 
     def apply_system_changes(self, env_path: Optional[Path] = None, startup_dir: Optional[Path] = None) -> bool:
@@ -2427,6 +3876,8 @@ class SettingsDialog(QtWidgets.QDialog):
         keys_changed = False
         for field_edit, env_name in (
             (self._gemini_key_edit, "GEMINI_API_KEY"),
+            (self._openai_key_edit, "OPENAI_API_KEY"),
+            (self._deepseek_key_edit, "DEEPSEEK_API_KEY"),
             (self._groq_key_edit, "GROQ_API_KEY"),
             (self._grok_key_edit, "GROK_API_KEY"),
             (self._nvidia_key_edit, "NVIDIA_API_KEY"),
@@ -2438,7 +3889,7 @@ class SettingsDialog(QtWidgets.QDialog):
                 keys_changed = True
 
         desired_startup = self._startup_chk.isChecked()
-        if desired_startup != self._initial_startup:
+        if desired_startup != self._initial_startup or (desired_startup and startup_dir is None):
             set_startup_enabled(desired_startup, startup_dir=startup_dir)
         return keys_changed
 
@@ -2461,6 +3912,10 @@ class DesktopCompanionApp(QtCore.QObject):
         self._active_confirm_box: Optional[QtWidgets.QMessageBox] = None
         self._worker_thread: Optional[QtCore.QThread] = None
         self._worker: Optional[StreamWorker] = None
+        self._briefing_thread: Optional[QtCore.QThread] = None
+        self._briefing_worker: Optional[WakeBriefingWorker] = None
+        self._startup_wake_timer: Optional[QtCore.QTimer] = None
+        self._last_wake_monotonic = -1e9
 
         self._confirm_requested.connect(
             self._on_confirm_requested, QtCore.Qt.ConnectionType.QueuedConnection
@@ -2490,15 +3945,19 @@ class DesktopCompanionApp(QtCore.QObject):
         )
 
         self.character = CharacterWidget(config)
+        self.wakeup_bubble = WakeupBubbleWidget(config.character_name)
         self.popup = ChatPopupWindow(config)
         self._tray = self._create_tray_icon()
 
         # Wire character signals
         self.character.clicked.connect(self.toggle_popup)
+        self.character.greet_requested.connect(self.greet_now)
         self.character.moved.connect(self._on_character_moved)
         self.character.sprite_dropped.connect(self._on_sprite_changed)
         self.character.size_change_requested.connect(self._on_size_changed)
         self.character.open_settings_requested.connect(self.open_settings)
+        self.character.avatar_gallery_requested.connect(self.open_avatar_gallery)
+        self.character.avatar_preset_requested.connect(self.switch_character_preset)
         self.character.clear_chat_requested.connect(self.clear_conversation)
         self.character.system_tools_toggled.connect(self.toggle_system_tools)
         self.character.all_drives_toggled.connect(self.toggle_all_drives)
@@ -2506,12 +3965,14 @@ class DesktopCompanionApp(QtCore.QObject):
         self.character.reset_pos_requested.connect(self.reset_position)
         self.character.hide_requested.connect(self.hide_character)
         self.character.quit_requested.connect(self.quit_app)
+        self.wakeup_bubble.chat_requested.connect(self._on_wakeup_bubble_clicked)
 
         # Wire popup signals
         self.popup.send_message.connect(self.send_user_message)
         self.popup.stop_requested.connect(self.stop_streaming)
         self.popup.clear_requested.connect(self.clear_conversation)
         self.popup.settings_requested.connect(self.open_settings)
+        self.popup.briefing_requested.connect(self.fetch_live_briefing)
         self.popup.mock_mode_requested.connect(lambda: self.switch_provider("mock"))
         self.popup.provider_switch_requested.connect(
             lambda p, m: self.switch_provider(p, m or None)
@@ -2521,24 +3982,39 @@ class DesktopCompanionApp(QtCore.QObject):
         # Single-instance listener
         self._instance_guard: Optional[SingleInstanceGuard] = None
 
-        # Global Windows hotkey (Ctrl+Shift+Space)
-        self._hotkey_filter = WindowsHotkeyFilter(self.summon_from_hotkey)
-        if config.hotkey_enabled and self._hotkey_filter.register():
+        # Global Windows hotkey (Ctrl+Shift+Space) + Windows power resume wake-up hook
+        self._hotkey_filter = WindowsHotkeyFilter(
+            self.summon_from_hotkey,
+            on_system_resume=self._on_system_resume,
+        )
+        if config.hotkey_enabled:
+            self._hotkey_filter.register()
+        if sys.platform == "win32":
             self._app.installNativeEventFilter(self._hotkey_filter)
 
         self._restore_or_default_position()
 
     def _create_tray_icon(self) -> QtWidgets.QSystemTrayIcon:
         tray = QtWidgets.QSystemTrayIcon(
-            QtGui.QIcon(draw_pet_pixmap(64, self._config.sprite_path)),
+            QtGui.QIcon(draw_pet_pixmap(64, self._config.sprite_path, self._config.character_id)),
             self,
         )
         tray.setToolTip(f"{self._config.character_name} Desktop Companion (Ctrl+Shift+Space)")
 
         menu = QtWidgets.QMenu(self.character)
         menu.addAction("Show / Toggle Chat", self.summon_from_hotkey)
+        menu.addAction("Greet Me / Daily Topics", self.greet_now)
         menu.addAction("Show Character", self.show_character)
         menu.addAction("Customize Character...", self.open_settings)
+        menu.addAction("Choose Character Avatar (Gallery)...", self.open_avatar_gallery)
+
+        avatar_menu = menu.addMenu("Switch Character Avatar")
+        for pid, preset in CHARACTER_PRESETS.items():
+            pa = avatar_menu.addAction(f"{preset.name} ({preset.category})")
+            pa.setCheckable(True)
+            pa.setChecked(self._config.character_id == pid and not self._config.sprite_path)
+            pa.triggered.connect(lambda _=False, p_id=pid: self.switch_character_preset(p_id))
+
         menu.addAction("Reset Position", self.reset_position)
         menu.addSeparator()
         menu.addAction("Quit", self.quit_app)
@@ -2554,11 +4030,20 @@ class DesktopCompanionApp(QtCore.QObject):
         ):
             self.summon_from_hotkey()
 
-    def start(self) -> None:
+    def start(self, startup_launch: bool = False) -> None:
         self.character.show()
-        self.character.show_speech_bubble(
-            f"Hi! I'm {self._config.character_name}. Click me or press Ctrl+Shift+Space!"
-        )
+        if self._config.wake_greeting_enabled:
+            delay_ms = 2500 if startup_launch else 150
+            self._startup_wake_timer = QtCore.QTimer(self)
+            self._startup_wake_timer.setSingleShot(True)
+            self._startup_wake_timer.timeout.connect(
+                lambda: self.trigger_wake_greeting(open_chat=self._config.wake_open_chat, system_resume=False)
+            )
+            self._startup_wake_timer.start(delay_ms)
+        else:
+            self.character.show_speech_bubble(
+                f"Hi! I'm {self._config.character_name}. Click me or press Ctrl+Shift+Space!"
+            )
 
     def _restore_or_default_position(self) -> None:
         screen = QtGui.QGuiApplication.primaryScreen()
@@ -2581,12 +4066,16 @@ class DesktopCompanionApp(QtCore.QObject):
         self._config.save()
         if self.popup.isVisible():
             self._position_popup_near_character()
+        if self.wakeup_bubble.isVisible():
+            self.wakeup_bubble.reposition_near(self.character.frameGeometry())
 
     def _on_character_moved(self, x: int, y: int) -> None:
         self._config.window_pos = [x, y]
         self._config.save()
         if self.popup.isVisible() and not self.popup.is_pinned():
             self._position_popup_near_character()
+        if self.wakeup_bubble.isVisible():
+            self.wakeup_bubble.reposition_near(self.character.frameGeometry())
 
     def _position_popup_near_character(self) -> None:
         char_geo = self.character.frameGeometry()
@@ -2617,6 +4106,7 @@ class DesktopCompanionApp(QtCore.QObject):
         self.character.raise_()
 
     def hide_character(self) -> None:
+        self.wakeup_bubble.hide()
         self.popup.hide()
         self.character.hide()
         self._tray.showMessage(
@@ -2628,21 +4118,101 @@ class DesktopCompanionApp(QtCore.QObject):
 
     def toggle_popup(self) -> None:
         if self.popup.isVisible():
-            self.popup.hide()
+            self.popup.hide_animated()
         else:
+            self.wakeup_bubble.hide()
             self.show_character()
             self._position_popup_near_character()
-            self.popup.show()
-            self.popup.focus_input()
+            self.popup.show_animated()
 
     def summon_from_hotkey(self) -> None:
         if not self.character.isVisible():
+            self.wakeup_bubble.hide()
             self.show_character()
             self._position_popup_near_character()
-            self.popup.show()
-            self.popup.focus_input()
+            self.popup.show_animated()
         else:
             self.toggle_popup()
+
+    def trigger_wake_greeting(
+        self,
+        open_chat: Optional[bool] = None,
+        system_resume: bool = False,
+        override_config: Optional[CharacterConfig] = None,
+        force_briefing: bool = False,
+    ) -> None:
+        """Display Lumi's wake-up greeting bubble and interactive daily-topic card."""
+        cfg = override_config or self._config
+        self._last_wake_monotonic = time.monotonic()
+        self.show_character()
+        self.character.set_state("happy")
+
+        data = build_wake_greeting_data(cfg, system_resume=system_resume)
+        self.character.show_speech_bubble(data["bubble_text"], duration_ms=10000)
+        self.wakeup_bubble.set_character_name(cfg.character_name)
+        self.wakeup_bubble.show_for_character(
+            self.character.frameGeometry(),
+            data["bubble_text"],
+            duration_ms=12000,
+        )
+
+        self.popup.show_wake_greeting(data, include_briefing_placeholder=False)
+        should_open = cfg.wake_open_chat if open_chat is None else bool(open_chat)
+        if should_open:
+            self._position_popup_near_character()
+            self.popup.show_passive()
+
+        if force_briefing or (cfg.wake_auto_fetch_briefing and cfg.use_tools):
+            self.fetch_live_briefing(override_config=cfg)
+
+    def greet_now(self) -> None:
+        """Manual trigger (context menu / tray) to greet and open daily topics immediately."""
+        self.trigger_wake_greeting(open_chat=True, system_resume=False)
+        self.popup.focus_input()
+
+    def _on_wakeup_bubble_clicked(self) -> None:
+        self.show_character()
+        self._position_popup_near_character()
+        self.popup.show()
+        self.popup.focus_input()
+
+    def _on_system_resume(self) -> None:
+        """Respond to Windows Sleep/Hibernate resume subject to cooldown."""
+        if not self._config.wake_greeting_enabled or not self._config.wake_on_system_resume:
+            return
+        cooldown_sec = max(60, int(self._config.wake_resume_cooldown_minutes) * 60)
+        if (time.monotonic() - self._last_wake_monotonic) < cooldown_sec:
+            return
+        self.trigger_wake_greeting(open_chat=self._config.wake_open_chat, system_resume=True)
+
+    def fetch_live_briefing(self, override_config: Optional[CharacterConfig] = None) -> None:
+        """Fetch live summaries for enabled daily topics on a background thread."""
+        if self._briefing_thread is not None and self._briefing_thread.isRunning():
+            return
+        cfg = override_config or self._config
+        if self.popup._wake_briefing_browser is None:
+            self.popup.show_wake_greeting(build_wake_greeting_data(cfg), include_briefing_placeholder=True)
+        else:
+            self.popup.set_wake_briefing_loading()
+
+        thread = QtCore.QThread(self)
+        worker = WakeBriefingWorker(cfg)
+        worker.moveToThread(thread)
+
+        thread.started.connect(worker.run)
+        worker.briefing_ready.connect(self.popup.set_wake_briefing_markdown)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._on_briefing_thread_finished)
+
+        self._briefing_thread = thread
+        self._briefing_worker = worker
+        thread.start()
+
+    def _on_briefing_thread_finished(self) -> None:
+        self._briefing_thread = None
+        self._briefing_worker = None
 
     def _resolved_allowed_roots(self, cfg: CharacterConfig) -> List[Path]:
         roots = [
@@ -2798,6 +4368,7 @@ class DesktopCompanionApp(QtCore.QObject):
             box.deleteLater()
 
     def _exec_clipboard_ui(self, action: str, text: str, paths: List[str]) -> str:
+        QtWidgets.QApplication.processEvents()
         cb = QtWidgets.QApplication.clipboard()
         if cb is None:
             return "Error: Clipboard is unavailable."
@@ -2814,11 +4385,14 @@ class DesktopCompanionApp(QtCore.QObject):
             return content if content else "(Clipboard is empty)"
         if action == "set":
             cb.setText(text)
+            QtWidgets.QApplication.processEvents()
             return f"Copied {len(text)} character(s) to clipboard."
         if action == "copy_files":
             mime = QtCore.QMimeData()
             mime.setUrls([QtCore.QUrl.fromLocalFile(p) for p in paths])
+            mime.setText("\n".join(paths))
             cb.setMimeData(mime)
+            QtWidgets.QApplication.processEvents()
             return (
                 f"Copied {len(paths)} file/folder path(s) to Windows clipboard "
                 "(ready for Ctrl+V paste)."
@@ -2873,11 +4447,14 @@ class DesktopCompanionApp(QtCore.QObject):
                 ),
             )
         self.character.apply_config(new_cfg)
+        self.wakeup_bubble.set_character_name(new_cfg.character_name)
         self.popup.apply_config(new_cfg)
-        self._tray.setIcon(QtGui.QIcon(draw_pet_pixmap(64, new_cfg.sprite_path)))
+        self._tray.setIcon(QtGui.QIcon(draw_pet_pixmap(64, new_cfg.sprite_path, new_cfg.character_id)))
         self._tray.setToolTip(f"{new_cfg.character_name} Desktop Companion (Ctrl+Shift+Space)")
         if self.popup.isVisible() and not self.popup.is_pinned():
             self._position_popup_near_character()
+        if self.wakeup_bubble.isVisible():
+            self.wakeup_bubble.reposition_near(self.character.frameGeometry())
 
     def _on_size_changed(self, new_size: int) -> None:
         clamped = max(40, min(260, int(new_size)))
@@ -2887,6 +4464,8 @@ class DesktopCompanionApp(QtCore.QObject):
         self.character.show_speech_bubble(f"Size: {clamped}px", duration_ms=1500)
         if self.popup.isVisible() and not self.popup.is_pinned():
             self._position_popup_near_character()
+        if self.wakeup_bubble.isVisible():
+            self.wakeup_bubble.reposition_near(self.character.frameGeometry())
 
     def _on_sprite_changed(self, path: str) -> None:
         self._config.sprite_path = path
@@ -2905,8 +4484,32 @@ class DesktopCompanionApp(QtCore.QObject):
         self._apply_updated_config(self._config)
         self.character.show_speech_bubble(f"Switched to {provider} ({chosen_model})!")
 
+    def open_avatar_gallery(self) -> None:
+        dlg = AvatarGalleryDialog(
+            self.popup if self.popup.isVisible() else self.character,
+            current_character_id=self._config.character_id,
+        )
+        if dlg.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+            preset, sync_persona = dlg.get_selected_preset()
+            self.switch_character_preset(preset.id, update_persona=sync_persona)
+
+    def switch_character_preset(self, preset_id: str, update_persona: bool = True) -> None:
+        preset = get_character_preset(preset_id)
+        self._config.character_id = preset.id
+        self._config.sprite_path = ""
+        self._config.character_name = preset.name
+        if update_persona and preset.personality_prompt:
+            self._config.personality_prompt = preset.personality_prompt
+        self._apply_updated_config(self._config)
+        self.character.set_state("happy")
+        quote = preset.theme_quote or f"I am {preset.name}!"
+        self.character.show_speech_bubble(quote, duration_ms=3500)
+
     def open_settings(self) -> None:
         dlg = SettingsDialog(self._config, self.popup if self.popup.isVisible() else self.character)
+        dlg.preview_wake_requested.connect(
+            lambda: self.trigger_wake_greeting(open_chat=True, override_config=dlg.updated_config())
+        )
         if dlg.exec() == QtWidgets.QDialog.DialogCode.Accepted:
             keys_changed = dlg.apply_system_changes()
             self._apply_updated_config(dlg.updated_config(), refresh_keys=keys_changed)
@@ -2996,9 +4599,16 @@ class DesktopCompanionApp(QtCore.QObject):
         self.popup.focus_input()
 
     def quit_app(self) -> None:
+        if self._startup_wake_timer is not None:
+            self._startup_wake_timer.stop()
+        self.wakeup_bubble._hide_timer.stop()
+        self.wakeup_bubble.close()
         self.stop_streaming()
         if self._worker_thread is not None and self._worker_thread.isRunning():
             self._worker_thread.wait(1500)
+        if self._briefing_thread is not None and self._briefing_thread.isRunning():
+            self._briefing_thread.quit()
+            self._briefing_thread.wait(1500)
         if self._instance_guard is not None:
             self._instance_guard.close()
         self._hotkey_filter.unregister()
@@ -3017,6 +4627,7 @@ def launch_desktop_companion(
     name: Optional[str] = None,
     single_instance: bool = True,
     instance_name: str = SINGLE_INSTANCE_NAME,
+    startup: bool = False,
 ) -> int:
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
@@ -3041,7 +4652,7 @@ def launch_desktop_companion(
     if not cfg.sprite_path and ico_path.is_file():
         app.setWindowIcon(QtGui.QIcon(str(ico_path)))
     else:
-        app.setWindowIcon(QtGui.QIcon(draw_pet_pixmap(64, cfg.sprite_path)))
+        app.setWindowIcon(QtGui.QIcon(draw_pet_pixmap(64, cfg.sprite_path, cfg.character_id)))
 
     controller = DesktopCompanionApp(app, cfg)
     if single_instance:
@@ -3049,7 +4660,7 @@ def launch_desktop_companion(
         if guard.start_listening():
             guard.activated.connect(controller.activate_from_second_launch)
             controller._instance_guard = guard
-    controller.start()
+    controller.start(startup_launch=startup)
     return app.exec()
 
 
@@ -3066,6 +4677,7 @@ def main() -> None:
     parser.add_argument("--sprite", default=None, help="Path to custom PNG/GIF/WebP character image")
     parser.add_argument("--name", default=None, help="Custom character name")
     parser.add_argument("--multi", action="store_true", help="Allow running alongside an existing instance")
+    parser.add_argument("--startup", action="store_true", help="Launched at Windows Startup with gentle wake-up greeting")
     parser.add_argument("--instance-name", default=SINGLE_INSTANCE_NAME, help=argparse.SUPPRESS)
     args = parser.parse_args()
 
@@ -3077,6 +4689,7 @@ def main() -> None:
             name=args.name,
             single_instance=not args.multi,
             instance_name=args.instance_name,
+            startup=args.startup,
         )
     )
 

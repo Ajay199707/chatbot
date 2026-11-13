@@ -637,3 +637,107 @@ def test_text_tool_call_parser_handles_python_style_and_adjacent_blocks():
         '```tool_call\n{"name": "get_weather", "arguments": {"city": "Chennai"}}\n',
         allowed,
     ) is False
+
+
+def test_mock_mode_routes_daily_topics_to_get_news(monkeypatch):
+    seen_keywords = []
+
+    def fake_get_news(keyword: str) -> str:
+        seen_keywords.append(keyword)
+        return f"- Headline for {keyword} [DailyTest]"
+
+    monkeypatch.setattr(chatbot.api_tools, "get_news", fake_get_news)
+
+    bot = chatbot.Chatbot(chatbot.ChatbotConfig(provider="mock", use_tools=True))
+    events1 = list(bot.stream_turn("What is happening in cinema and new movie releases today?"))
+    events2 = list(bot.stream_turn("What is happening in the tech field today?"))
+
+    assert seen_keywords[0] == "cinema movies box office"
+    assert seen_keywords[1] == "technology AI software"
+    assert any(e.get("type") == "tool_end" and e.get("name") == "get_news" for e in events1)
+    assert any(e.get("type") == "tool_end" and e.get("name") == "get_news" for e in events2)
+    assert bot.history[0].role == "user"
+
+
+def test_openai_and_deepseek_providers_streaming_and_reasoning(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai-test")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-deepseek-test")
+    assert chatbot.resolve_base_url("openai") == "https://api.openai.com/v1"
+    assert chatbot.resolve_base_url("deepseek") == "https://api.deepseek.com"
+    assert chatbot.default_model_for_provider("openai") == "gpt-4.1-mini"
+    assert chatbot.default_model_for_provider("deepseek") == "deepseek-chat"
+
+    seen_requests = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode("utf-8"))
+        seen_requests.append((str(request.url), request.headers.get("authorization"), body))
+        if "api.openai.com" in str(request.url):
+            sse = _make_sse_bytes([
+                {"choices": [{"delta": {"content": "OpenAI reply ok!"}}]},
+                "[DONE]",
+            ])
+            return httpx.Response(200, content=sse, headers={"content-type": "text/event-stream"})
+
+        # DeepSeek reasoner round 1 triggers tool call + reasoning_content; round 2 final answer
+        if len(body["messages"]) == 2:
+            sse = _make_sse_bytes([
+                {"choices": [{"delta": {"reasoning_content": "Let me check the clock."}}]},
+                {
+                    "choices": [{
+                        "delta": {
+                            "tool_calls": [{
+                                "index": 0,
+                                "id": "call_ds_1",
+                                "function": {"name": "get_current_datetime", "arguments": "{}"},
+                            }]
+                        }
+                    }]
+                },
+                "[DONE]",
+            ])
+            return httpx.Response(200, content=sse, headers={"content-type": "text/event-stream"})
+
+        sse = _make_sse_bytes([
+            {"choices": [{"delta": {"reasoning_content": "Done."}}]},
+            {"choices": [{"delta": {"content": "DeepSeek answer with time!"}}]},
+            "[DONE]",
+        ])
+        return httpx.Response(200, content=sse, headers={"content-type": "text/event-stream"})
+
+    real_client = httpx.Client
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(
+        chatbot.httpx,
+        "Client",
+        lambda *args, **kwargs: real_client(transport=transport, **kwargs),
+    )
+
+    # OpenAI gpt-5-mini uses max_completion_tokens and omits temperature
+    oa_bot = chatbot.Chatbot(chatbot.ChatbotConfig(provider="openai", model_name="gpt-5-mini"))
+    oa_events = list(oa_bot.stream_turn("hi openai"))
+    assert "".join(e["content"] for e in oa_events if e["type"] == "token") == "OpenAI reply ok!"
+    oa_url, oa_auth, oa_body = seen_requests[0]
+    assert oa_url == "https://api.openai.com/v1/chat/completions"
+    assert oa_auth == "Bearer sk-openai-test"
+    assert oa_body["max_completion_tokens"] == oa_bot.config.max_tokens
+    assert "max_tokens" not in oa_body
+    assert "temperature" not in oa_body
+
+    # DeepSeek deepseek-reasoner streams thought tokens and preserves reasoning_content on tool follow-up
+    ds_bot = chatbot.Chatbot(
+        chatbot.ChatbotConfig(provider="deepseek", model_name="deepseek-reasoner", use_tools=True)
+    )
+    ds_events = list(ds_bot.stream_turn("what time is it?"))
+    assert "".join(e["content"] for e in ds_events if e["type"] == "token") == "DeepSeek answer with time!"
+    assert any(e["type"] == "thought" and "clock" in e["content"] for e in ds_events)
+    ds_round2_messages = seen_requests[2][2]["messages"]
+    assert ds_round2_messages[2]["role"] == "assistant"
+    assert ds_round2_messages[2]["reasoning_content"] == "Let me check the clock."
+
+    # /api/status exposes both providers
+    client = TestClient(chatbot.create_app(chatbot.ChatbotConfig(provider="mock")))
+    st = client.get("/api/status").json()
+    assert st["keys_configured"]["openai"] is True
+    assert st["keys_configured"]["deepseek"] is True
+    assert "openai" in st["models"] and "deepseek" in st["models"]

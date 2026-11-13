@@ -173,6 +173,26 @@ XAI_MODELS = [
     "grok-3",
 ]
 
+OPENAI_BASE_URL = "https://api.openai.com/v1"
+OPENAI_DEFAULT_MODEL = "gpt-4.1-mini"
+OPENAI_MODELS = [
+    "gpt-4.1-mini",
+    "gpt-4.1",
+    "gpt-5-mini",
+    "gpt-5",
+    "gpt-4o-mini",
+    "gpt-4o",
+    "o4-mini",
+    "o3-mini",
+]
+
+DEEPSEEK_BASE_URL = "https://api.deepseek.com"
+DEEPSEEK_DEFAULT_MODEL = "deepseek-chat"
+DEEPSEEK_MODELS = [
+    "deepseek-chat",
+    "deepseek-reasoner",
+]
+
 OLLAMA_DEFAULT_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434/v1")
 OLLAMA_DEFAULT_MODEL = "llama3:8b"
 OLLAMA_MODELS = [
@@ -190,6 +210,24 @@ PROVIDER_SPECS: Dict[str, Dict[str, Any]] = {
         "models": GEMINI_MODELS,
         "base_url": GEMINI_BASE_URL,
         "env_keys": ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
+        "requires_key": True,
+    },
+    "openai": {
+        "label": "OpenAI (GPT / o-series)",
+        "protocol": "openai",
+        "default_model": OPENAI_DEFAULT_MODEL,
+        "models": OPENAI_MODELS,
+        "base_url": OPENAI_BASE_URL,
+        "env_keys": ("OPENAI_API_KEY",),
+        "requires_key": True,
+    },
+    "deepseek": {
+        "label": "DeepSeek (Chat / Reasoner)",
+        "protocol": "openai",
+        "default_model": DEEPSEEK_DEFAULT_MODEL,
+        "models": DEEPSEEK_MODELS,
+        "base_url": DEEPSEEK_BASE_URL,
+        "env_keys": ("DEEPSEEK_API_KEY",),
         "requires_key": True,
     },
     "ollama": {
@@ -603,7 +641,33 @@ def resolve_base_url(provider: str, explicit_url: Optional[str] = None) -> Optio
     return spec.get("base_url") if spec else None
 
 
-_NON_CHAT_MODEL_HINTS = ("whisper", "orpheus", "prompt-guard", "safeguard", "embed", "tts")
+_NON_CHAT_MODEL_HINTS = (
+    "whisper",
+    "orpheus",
+    "prompt-guard",
+    "safeguard",
+    "embed",
+    "tts",
+    "dall-e",
+    "gpt-image",
+    "sora",
+    "moderation",
+    "transcribe",
+    "realtime",
+    "-audio",
+    "babbage",
+    "davinci",
+)
+
+
+def _is_reasoning_model(provider: str, model_name: Optional[str]) -> bool:
+    """Return True for OpenAI o-series / gpt-5 and DeepSeek reasoner models."""
+    low = (model_name or "").strip().lower()
+    if provider == "openai":
+        return low.startswith(("o1", "o3", "o4", "gpt-5"))
+    if provider == "deepseek":
+        return "reasoner" in low
+    return False
 
 
 def normalize_model_for_provider(provider: str, model_name: Optional[str]) -> str:
@@ -1474,13 +1538,18 @@ class Chatbot:
                             _build_text_tool_system_prompt(tools_enabled, include_system),
                         )
 
+                    is_reasoning = _is_reasoning_model(provider, self.config.model_name)
                     payload: Dict[str, Any] = {
                         "model": self.config.model_name,
                         "messages": request_messages,
-                        "temperature": self.config.temperature,
-                        "max_tokens": self.config.max_tokens,
                         "stream": True,
                     }
+                    if not is_reasoning:
+                        payload["temperature"] = self.config.temperature
+                    if provider == "openai":
+                        payload["max_completion_tokens"] = self.config.max_tokens
+                    else:
+                        payload["max_tokens"] = self.config.max_tokens
                     if (tools_enabled or include_system) and not text_tool_mode:
                         payload["tools"] = build_openai_tools(
                             include_system=include_system,
@@ -1489,6 +1558,7 @@ class Chatbot:
                         payload["tool_choice"] = "auto"
 
                     round_text_parts: List[str] = []
+                    round_reasoning_parts: List[str] = []
                     round_start_chunk_idx = len(answer_chunks)
                     tool_calls_by_idx: Dict[int, Dict[str, Any]] = {}
                     allowed_text_tool_names = (
@@ -1544,6 +1614,11 @@ class Chatbot:
                             if not choices:
                                 continue
                             delta = choices[0].get("delta") or {}
+
+                            reasoning_piece = delta.get("reasoning_content")
+                            if reasoning_piece:
+                                round_reasoning_parts.append(reasoning_piece)
+                                yield {"type": "thought", "content": reasoning_piece}
 
                             content_piece = delta.get("content")
                             if content_piece:
@@ -1612,13 +1687,14 @@ class Chatbot:
 
                     if ordered_calls and (tools_enabled or include_system):
                         if not used_text_tool_call:
-                            messages.append(
-                                {
-                                    "role": "assistant",
-                                    "content": round_text or None,
-                                    "tool_calls": ordered_calls,
-                                }
-                            )
+                            assistant_msg: Dict[str, Any] = {
+                                "role": "assistant",
+                                "content": round_text or None,
+                                "tool_calls": ordered_calls,
+                            }
+                            if round_reasoning_parts:
+                                assistant_msg["reasoning_content"] = "".join(round_reasoning_parts)
+                            messages.append(assistant_msg)
                         else:
                             del answer_chunks[round_start_chunk_idx:]
                             messages.append({"role": "assistant", "content": round_text})
@@ -1778,6 +1854,11 @@ class Chatbot:
                 tool_plan = ("list_drives", {})
             elif any(
                 kw in lower
+                for kw in ("recycle bin", "recyclebin", "recycle_bin", "trash", "deleted files", "deleted file")
+            ):
+                tool_plan = ("list_recycle_bin", {})
+            elif any(
+                kw in lower
                 for kw in ("download", "desktop", "document", "folder", "files", "file ", "directory", "allowed", "drive")
             ):
                 folder = ""
@@ -1811,8 +1892,40 @@ class Chatbot:
                 tool_plan = ("list_custom_apis", {})
             elif "gold" in lower or "silver" in lower:
                 tool_plan = ("get_india_gold_price", {})
-            elif "news" in lower:
-                topic = user_input.replace("news", "").strip(" ?.:") or "India"
+            elif any(
+                kw in lower
+                for kw in (
+                    "news",
+                    "headline",
+                    "tech field",
+                    "technology",
+                    "cinema",
+                    "movie",
+                    "box office",
+                    "cricket",
+                    "sports",
+                    "stock market",
+                    "briefing",
+                )
+            ):
+                if "cinema" in lower or "movie" in lower or "box office" in lower:
+                    topic = "cinema movies box office"
+                elif "tech" in lower:
+                    topic = "technology AI software"
+                elif "cricket" in lower or "sports" in lower:
+                    topic = "cricket sports"
+                elif "stock" in lower or "market" in lower:
+                    topic = "stock market finance India"
+                else:
+                    topic = (
+                        re.sub(
+                            r"\b(?:what|is|are|today's|todays|today|latest|recent|the|in|on|news|headlines|happening)\b",
+                            "",
+                            user_input,
+                            flags=re.IGNORECASE,
+                        ).strip(" ?.:,")
+                        or "India"
+                    )
                 tool_plan = ("get_news", {"keyword": topic})
             elif "time" in lower or "date" in lower or "day" in lower:
                 tool_plan = ("get_current_datetime", {})
@@ -1834,8 +1947,8 @@ class Chatbot:
                 f"**[Mock Mode]** You asked: _{user_input}_\n\n"
                 "Mock Mode only simulates offline replies. For full AI tool use "
                 "(search, create, copy/move, Recycle Bin, app launch), click **Edit** "
-                "or right-click -> **Switch Provider** to pick **Groq**, **Grok**, "
-                "**Google Gemini**, **NVIDIA**, or local **Ollama**."
+                "or right-click -> **Switch Provider** to pick **Groq**, **OpenAI**, "
+                "**DeepSeek**, **Google Gemini**, **NVIDIA**, or local **Ollama**."
             )
 
         delay = 0.002 if len(reply) > 350 else 0.015
@@ -1956,6 +2069,8 @@ def create_app(base_config: Optional[ChatbotConfig] = None) -> FastAPI:
                 "system_prompt": probe.config.system_prompt,
                 "keys_configured": {
                     "gemini": bool(resolve_api_key("gemini", probe.config.api_key if probe.config.provider == "gemini" else None)),
+                    "openai": bool(resolve_api_key("openai", probe.config.api_key if probe.config.provider == "openai" else None)),
+                    "deepseek": bool(resolve_api_key("deepseek", probe.config.api_key if probe.config.provider == "deepseek" else None)),
                     "ollama": True,
                     "groq": bool(resolve_api_key("groq", probe.config.api_key if probe.config.provider == "groq" else None)),
                     "grok": bool(resolve_api_key("grok", probe.config.api_key if probe.config.provider == "grok" else None)),
@@ -1965,6 +2080,8 @@ def create_app(base_config: Optional[ChatbotConfig] = None) -> FastAPI:
                 },
                 "models": {
                     "gemini": GEMINI_MODELS,
+                    "openai": OPENAI_MODELS,
+                    "deepseek": DEEPSEEK_MODELS,
                     "ollama": ollama_models,
                     "groq": GROQ_MODELS,
                     "grok": XAI_MODELS,

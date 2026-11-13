@@ -39,6 +39,14 @@ if ($Clean) {
 }
 $PyInstallerArgs += (Join-Path $ProjectDir "AICompanion.spec")
 
+# Stop running instance if any so dist\AICompanion.exe is not locked
+$RunningInstances = Get-Process -Name "AICompanion" -ErrorAction SilentlyContinue
+if ($RunningInstances) {
+    Write-Host "Stopping running AICompanion instance(s) before build..." -ForegroundColor Yellow
+    $RunningInstances | Stop-Process -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Milliseconds 800
+}
+
 Write-Host "Running PyInstaller..."
 & $PythonExe @PyInstallerArgs
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller build failed." }
@@ -58,11 +66,15 @@ if ($CopyToRoot) {
 function New-ExeShortcut {
     param(
         [string]$ShortcutPath,
-        [string]$TargetExe
+        [string]$TargetExe,
+        [switch]$StartupMode
     )
     $ws = New-Object -ComObject WScript.Shell
     $sc = $ws.CreateShortcut($ShortcutPath)
     $sc.TargetPath = $TargetExe
+    if ($StartupMode) {
+        $sc.Arguments = "--startup"
+    }
     $sc.WorkingDirectory = (Split-Path -Parent $TargetExe)
     $sc.IconLocation = "$TargetExe,0"
     $sc.Description = "Always-on-screen Desktop AI Character Companion"
@@ -79,7 +91,7 @@ if ($CreateDesktopShortcut) {
 if ($EnableStartup) {
     $StartupDir = [Environment]::GetFolderPath("Startup")
     $StartupLink = Join-Path $StartupDir "AICharacterCompanion.lnk"
-    New-ExeShortcut -ShortcutPath $StartupLink -TargetExe $FinalExe
+    New-ExeShortcut -ShortcutPath $StartupLink -TargetExe $FinalExe -StartupMode
     Write-Host "Enabled Windows Startup launch: $StartupLink" -ForegroundColor Green
 }
 
