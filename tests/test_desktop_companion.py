@@ -969,3 +969,102 @@ def test_character_widget_ambient_halo_and_comic_bubble():
     finally:
         w.deleteLater()
 
+
+def test_tasks_dialog_and_alert_popup(tmp_path, monkeypatch):
+    import task_manager
+    _get_qapp()
+    test_db = tmp_path / "gui_tasks.json"
+    tm = task_manager.TaskManager(str(test_db))
+    monkeypatch.setattr(task_manager, "get_task_manager", lambda: tm)
+
+    cfg = dc.CharacterConfig(character_name="Ben", character_id="ben_tennyson")
+    dlg = dc.TasksDialog(config=cfg)
+    try:
+        # Add a task
+        dlg._new_todo_input.setText("Test companion task")
+        dlg._on_add_todo()
+        assert len(tm.get_todos("pending")) == 1
+        assert tm.get_todos("pending")[0].title == "Test companion task"
+
+        # Toggle task complete
+        t_id = tm.get_todos("pending")[0].id
+        dlg._on_toggle_todo(t_id, True)
+        assert len(tm.get_todos("pending")) == 0
+        assert len(tm.get_todos("completed")) == 1
+
+        # Add alarm
+        dlg._alm_time_input.setText("08:30")
+        dlg._alm_label_input.setText("Workout Alarm")
+        dlg._on_add_alarm()
+        assert len(tm.get_alarms()) == 1
+        assert tm.get_alarms()[0].time_str == "08:30"
+
+        # Add reminder
+        dlg._rem_msg_input.setText("Stretch break")
+        dlg._rem_time_input.setText("in 15m")
+        dlg._on_add_reminder()
+        assert len(tm.get_reminders("pending")) == 1
+
+        # Test AlertNotificationPopup
+        done_called = False
+        snooze_called = False
+
+        def on_done():
+            nonlocal done_called
+            done_called = True
+
+        def on_snooze(mins):
+            nonlocal snooze_called
+            snooze_called = True
+
+        popup = dc.AlertNotificationPopup(
+            title="⏰ Reminder",
+            message="Stretch break",
+            target_id="rem_123",
+            on_done=on_done,
+            on_snooze=on_snooze,
+        )
+        try:
+            popup._handle_done()
+            assert done_called is True
+            popup._handle_snooze(5)
+            assert snooze_called is True
+        finally:
+            popup.deleteLater()
+    finally:
+        dlg.deleteLater()
+
+
+def test_companion_reminder_scheduler_and_chips(tmp_path, monkeypatch):
+    from datetime import datetime
+    import task_manager
+    app = _get_qapp()
+    test_db = tmp_path / "scheduler_tasks.json"
+    tm = task_manager.TaskManager(str(test_db))
+    monkeypatch.setattr(task_manager, "get_task_manager", lambda: tm)
+    monkeypatch.setattr(dc, "play_alert_sound", lambda *args, **kwargs: None)
+
+    cfg = dc.CharacterConfig(character_name="Lumi", character_id="lumi")
+    controller = dc.DesktopCompanionApp(app, cfg)
+    try:
+        # Check Tasks chip in popup
+        assert controller.popup._tasks_chip is not None
+        assert controller.popup._tasks_chip.isHidden() is False
+
+        # Add due reminder
+        rem = tm.add_reminder("Immediate stretch", due_time=datetime(2020, 1, 1, 12, 0, 0))
+        controller._check_reminders_and_alarms()
+
+        # Alert popup should now be created
+        assert controller._alert_popup is not None
+        assert "Reminder: Immediate stretch" in controller.character._speech_text
+    finally:
+        if controller._reminder_timer:
+            controller._reminder_timer.stop()
+        if controller._alert_popup:
+            controller._alert_popup.close()
+            controller._alert_popup.deleteLater()
+        controller.character.deleteLater()
+        controller.popup.deleteLater()
+
+

@@ -56,6 +56,27 @@ from character_painters import (
     paint_animated_character,
 )
 import system_tools
+import task_manager
+
+
+def play_alert_sound(kind: str = "reminder", enabled: bool = True) -> None:
+    """Play pleasant non-blocking audio chimes on Windows."""
+    if not enabled or sys.platform != "win32":
+        return
+
+    def _worker():
+        try:
+            import winsound
+            if kind == "alarm":
+                for freq in (659, 784, 1046):
+                    winsound.Beep(freq, 140)
+            else:
+                for freq in (523, 659, 784):
+                    winsound.Beep(freq, 120)
+        except Exception:
+            pass
+
+    threading.Thread(target=_worker, daemon=True).start()
 
 
 def _resolve_config_file() -> Path:
@@ -220,6 +241,7 @@ class CharacterConfig:
     wake_weather_city: str = "Chennai"
     custom_topics: List[Dict[str, Any]] = field(default_factory=default_custom_topics)
     window_pos: Optional[List[int]] = None
+    alert_sound_enabled: bool = True
 
     @classmethod
     def load(cls, path: Path = CONFIG_FILE) -> "CharacterConfig":
@@ -325,6 +347,20 @@ def build_wake_greeting_data(
         bubble_tail = "How can I assist you?"
 
     welcome_prefix = "Welcome back! " if system_resume else ""
+
+    # Append daily task & alarm summary if any exist
+    try:
+        summary = task_manager.get_task_manager().get_daily_summary(current_dt=now)
+        notes = []
+        if summary.get("pending_todo_count", 0) > 0:
+            notes.append(f"📋 {summary['pending_todo_count']} pending task(s)")
+        if summary.get("active_alarm_count", 0) > 0:
+            notes.append(f"⏰ {summary['active_alarm_count']} active alarm(s)")
+        if notes:
+            question = f"{question} (Today: {', '.join(notes)})"
+    except Exception:
+        pass
+
     bubble_text = f"{greeting} {welcome_prefix}How can I assist you? {bubble_tail}".strip()
     if len(bubble_text) > 135:
         bubble_text = bubble_text[:132].rstrip() + "..."
@@ -1016,6 +1052,7 @@ class CharacterWidget(QtWidgets.QWidget):
     open_settings_requested = QtCore.Signal()
     avatar_gallery_requested = QtCore.Signal()
     avatar_preset_requested = QtCore.Signal(str)
+    tasks_requested = QtCore.Signal()
     clear_chat_requested = QtCore.Signal()
     provider_change_requested = QtCore.Signal(str)
     system_tools_toggled = QtCore.Signal(bool)
@@ -1358,6 +1395,7 @@ class CharacterWidget(QtWidgets.QWidget):
         )
         act_chat = menu.addAction(f"Chat with {self._config.character_name}")
         act_greet = menu.addAction("Greet Me / Daily Topics")
+        act_tasks = menu.addAction("📋 Tasks & Reminders...")
         act_customize = menu.addAction("Customize Character & Persona...")
         act_gallery = menu.addAction("Choose Character Avatar (Gallery)...")
 
@@ -1409,6 +1447,8 @@ class CharacterWidget(QtWidgets.QWidget):
             self.clicked.emit()
         elif chosen == act_greet:
             self.greet_requested.emit()
+        elif chosen == act_tasks:
+            self.tasks_requested.emit()
         elif chosen == act_customize:
             self.open_settings_requested.emit()
         elif chosen == act_gallery:
@@ -1683,6 +1723,7 @@ class ChatPopupWindow(QtWidgets.QWidget):
     stop_requested = QtCore.Signal()
     clear_requested = QtCore.Signal()
     settings_requested = QtCore.Signal()
+    tasks_requested = QtCore.Signal()
     mock_mode_requested = QtCore.Signal()
     provider_switch_requested = QtCore.Signal(str, str)
     enable_web_tools_requested = QtCore.Signal()
@@ -2037,6 +2078,7 @@ class ChatPopupWindow(QtWidgets.QWidget):
         self._chips_signature = sig
         self._chips_layout.clear_widgets()
         self._files_chip = None
+        self._tasks_chip = None
         for topic in greeting_data["topics"]:
             self._chips_layout.addWidget(
                 self._make_topic_pill(topic["label"], topic["prompt"], self._submit_text)
@@ -2049,6 +2091,16 @@ class ChatPopupWindow(QtWidgets.QWidget):
         files_btn.setVisible(bool(config.enable_system_tools))
         self._files_chip = files_btn
         self._chips_layout.addWidget(files_btn)
+
+        tasks_btn = QtWidgets.QPushButton("📋 Tasks")
+        tasks_btn.setStyleSheet(
+            "QPushButton{background:rgba(30,41,59,0.85);color:#38bdf8;border:1px solid rgba(56,189,248,0.4);"
+            "border-radius:12px;padding:3px 10px;font-size:11px;font-weight:700;}"
+            "QPushButton:hover{background:rgba(56,189,248,0.25);color:#ffffff;border-color:#38bdf8;}"
+        )
+        tasks_btn.clicked.connect(self.tasks_requested.emit)
+        self._tasks_chip = tasks_btn
+        self._chips_layout.addWidget(tasks_btn)
         self._chips_host.updateGeometry()
 
     def apply_config(self, config: CharacterConfig) -> None:
@@ -3499,6 +3551,12 @@ class SettingsDialog(QtWidgets.QDialog):
         self._wake_briefing_chk.setChecked(bool(self._config.wake_auto_fetch_briefing))
         wake_layout.addWidget(self._wake_briefing_chk)
 
+        self._alert_sound_chk = QtWidgets.QCheckBox(
+            "Play audio chimes for Alarms & Reminders"
+        )
+        self._alert_sound_chk.setChecked(bool(getattr(self._config, "alert_sound_enabled", True)))
+        wake_layout.addWidget(self._alert_sound_chk)
+
         row1 = QtWidgets.QHBoxLayout()
         row1.setSpacing(8)
         row1.addWidget(QtWidgets.QLabel("Your Name:"))
@@ -3869,6 +3927,7 @@ class SettingsDialog(QtWidgets.QDialog):
         self._config.wake_weather_city = self._wake_city_edit.text().strip() or "Chennai"
         self._config.wake_resume_cooldown_minutes = int(self._wake_cooldown_spin.value())
         self._config.custom_topics = _resolved_topics(copy.deepcopy(self._topics_draft))
+        self._config.alert_sound_enabled = self._alert_sound_chk.isChecked()
         return self._config
 
     def apply_system_changes(self, env_path: Optional[Path] = None, startup_dir: Optional[Path] = None) -> bool:
@@ -3892,6 +3951,658 @@ class SettingsDialog(QtWidgets.QDialog):
         if desired_startup != self._initial_startup or (desired_startup and startup_dir is None):
             set_startup_enabled(desired_startup, startup_dir=startup_dir)
         return keys_changed
+
+
+# ============================================================
+# ALARM & REMINDER ALERT POPUP
+# ============================================================
+
+class AlertNotificationPopup(QtWidgets.QWidget):
+    """Floating frosted-glass alert card for alarms & reminders."""
+
+    def __init__(
+        self,
+        title: str,
+        message: str,
+        target_id: str,
+        is_alarm: bool = False,
+        accent_color: str = "#38bdf8",
+        on_done: Optional[Any] = None,
+        on_snooze: Optional[Any] = None,
+        parent: Optional[QtWidgets.QWidget] = None,
+    ):
+        super().__init__(
+            parent,
+            QtCore.Qt.WindowType.FramelessWindowHint
+            | QtCore.Qt.WindowType.WindowStaysOnTopHint
+            | QtCore.Qt.WindowType.Tool,
+        )
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self._on_done = on_done
+        self._on_snooze = on_snooze
+        self._target_id = target_id
+        self._is_alarm = is_alarm
+
+        vbox = QtWidgets.QVBoxLayout(self)
+        vbox.setContentsMargins(8, 8, 8, 8)
+
+        card = QtWidgets.QFrame()
+        card.setObjectName("alertCard")
+        border_col = "#ef4444" if is_alarm else accent_color
+        card.setStyleSheet(
+            f"QFrame#alertCard {{"
+            f"  background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 rgba(30, 41, 59, 0.98), stop:1 rgba(15, 23, 42, 0.98));"
+            f"  border: 2px solid {border_col};"
+            f"  border-radius: 14px;"
+            f"}}"
+        )
+        card_layout = QtWidgets.QVBoxLayout(card)
+        card_layout.setContentsMargins(14, 12, 14, 12)
+        card_layout.setSpacing(8)
+
+        # Header
+        hdr = QtWidgets.QHBoxLayout()
+        hdr_icon = QtWidgets.QLabel("🚨" if is_alarm else "⏰")
+        hdr_icon.setStyleSheet("font-size: 18px;")
+        hdr.addWidget(hdr_icon)
+
+        hdr_title = QtWidgets.QLabel(title)
+        hdr_title.setStyleSheet(f"font-size: 14px; font-weight: bold; color: {border_col};")
+        hdr.addWidget(hdr_title)
+        hdr.addStretch(1)
+
+        close_btn = QtWidgets.QPushButton("✕")
+        close_btn.setFixedSize(22, 22)
+        close_btn.setStyleSheet(
+            "QPushButton { background: transparent; color: #94a3b8; border: none; font-size: 13px; font-weight: bold; } "
+            "QPushButton:hover { color: #f8fafc; }"
+        )
+        close_btn.clicked.connect(self.close)
+        hdr.addWidget(close_btn)
+        card_layout.addLayout(hdr)
+
+        # Message
+        msg_lbl = QtWidgets.QLabel(message)
+        msg_lbl.setWordWrap(True)
+        msg_lbl.setStyleSheet("font-size: 13px; color: #f8fafc; line-height: 1.4;")
+        card_layout.addWidget(msg_lbl)
+
+        # Buttons
+        btn_row = QtWidgets.QHBoxLayout()
+        btn_row.setSpacing(8)
+
+        done_btn = QtWidgets.QPushButton("✓ Done" if not is_alarm else "✓ Stop")
+        done_btn.setStyleSheet(
+            f"QPushButton {{"
+            f"  background: {border_col}; color: #ffffff; border: none; "
+            f"  border-radius: 8px; padding: 6px 14px; font-weight: bold; font-size: 12px;"
+            f"}}"
+            f"QPushButton:hover {{ background: #2563eb; }}"
+        )
+        done_btn.clicked.connect(self._handle_done)
+        btn_row.addWidget(done_btn)
+
+        if not is_alarm:
+            snooze_btn = QtWidgets.QPushButton("⏳ Snooze 5m")
+            snooze_btn.setStyleSheet(
+                "QPushButton {"
+                "  background: #1e293b; color: #38bdf8; border: 1px solid #334155; "
+                "  border-radius: 8px; padding: 6px 12px; font-size: 12px;"
+                "}"
+                "QPushButton:hover { background: #334155; border-color: #38bdf8; }"
+            )
+            snooze_btn.clicked.connect(lambda: self._handle_snooze(5))
+            btn_row.addWidget(snooze_btn)
+
+        btn_row.addStretch(1)
+        card_layout.addLayout(btn_row)
+
+        vbox.addWidget(card)
+        self.resize(320, 140)
+
+        # Auto-close after 60 seconds
+        self._auto_timer = QtCore.QTimer(self)
+        self._auto_timer.setSingleShot(True)
+        self._auto_timer.setInterval(60000)
+        self._auto_timer.timeout.connect(self.close)
+        self._auto_timer.start()
+
+    def _handle_done(self) -> None:
+        if self._on_done:
+            self._on_done()
+        self.close()
+
+    def _handle_snooze(self, mins: int) -> None:
+        if self._on_snooze:
+            self._on_snooze(mins)
+        self.close()
+
+
+# ============================================================
+# TASKS, ALARMS & REMINDERS DIALOG
+# ============================================================
+
+class TasksDialog(QtWidgets.QDialog):
+    """Full-featured interactive management dialog for To-Dos, Alarms & Reminders."""
+
+    def __init__(
+        self,
+        parent: Optional[QtWidgets.QWidget] = None,
+        config: Optional[CharacterConfig] = None,
+        on_data_changed: Optional[Any] = None,
+    ):
+        super().__init__(parent)
+        self.setWindowTitle("Tasks, Alarms & Reminders")
+        self.resize(580, 560)
+        self.setMinimumSize(520, 480)
+        self.setStyleSheet(
+            "QDialog { background: #0b1120; color: #f8fafc; }"
+            "QLabel { color: #f8fafc; }"
+            "QLineEdit { background: #1e293b; color: #f8fafc; border: 1px solid #334155; border-radius: 6px; padding: 6px 10px; font-size: 12px; }"
+            "QLineEdit:focus { border-color: #38bdf8; }"
+            "QComboBox { background: #1e293b; color: #f8fafc; border: 1px solid #334155; border-radius: 6px; padding: 5px 10px; font-size: 12px; }"
+            "QPushButton { background: #1e293b; color: #f8fafc; border: 1px solid #334155; border-radius: 6px; padding: 6px 12px; font-size: 12px; }"
+            "QPushButton:hover { background: #334155; border-color: #38bdf8; }"
+            "QTabWidget::pane { border: 1px solid #1e293b; background: #0f172a; border-radius: 8px; }"
+            "QTabBar::tab { background: #1e293b; color: #94a3b8; padding: 8px 18px; border-top-left-radius: 6px; border-top-right-radius: 6px; font-weight: bold; margin-right: 4px; }"
+            "QTabBar::tab:selected { background: #0f172a; color: #38bdf8; border-bottom: 2px solid #38bdf8; }"
+            "QScrollArea { background: transparent; border: none; }"
+            "QCheckBox { color: #f8fafc; spacing: 8px; font-size: 13px; }"
+            "QCheckBox::indicator { width: 18px; height: 18px; border-radius: 4px; border: 1.5px solid #475569; background: #1e293b; }"
+            "QCheckBox::indicator:checked { background: #22c55e; border-color: #22c55e; image: none; }"
+        )
+
+        self._config = config
+        self._on_data_changed = on_data_changed
+        self._todo_filter = "pending"
+
+        vbox = QtWidgets.QVBoxLayout(self)
+        vbox.setContentsMargins(18, 16, 18, 16)
+        vbox.setSpacing(12)
+
+        # Header
+        hdr = QtWidgets.QHBoxLayout()
+        title_box = QtWidgets.QVBoxLayout()
+        title = QtWidgets.QLabel("📋 Tasks & Schedule")
+        title.setStyleSheet("font-size: 17px; font-weight: bold; color: #38bdf8;")
+        sub = QtWidgets.QLabel("Your persistent personal organizer & alarm engine")
+        sub.setStyleSheet("font-size: 12px; color: #94a3b8;")
+        title_box.addWidget(title)
+        title_box.addWidget(sub)
+        hdr.addLayout(title_box)
+        hdr.addStretch(1)
+        vbox.addLayout(hdr)
+
+        # Tabs
+        self._tabs = QtWidgets.QTabWidget()
+        vbox.addWidget(self._tabs, 1)
+
+        self._build_todo_tab()
+        self._build_alarms_tab()
+
+        # Footer
+        footer = QtWidgets.QHBoxLayout()
+        self._footer_lbl = QtWidgets.QLabel("Changes are saved automatically.")
+        self._footer_lbl.setStyleSheet("font-size: 11px; color: #64748b;")
+        footer.addWidget(self._footer_lbl)
+        footer.addStretch(1)
+        close_btn = QtWidgets.QPushButton("Close")
+        close_btn.clicked.connect(self.close)
+        footer.addWidget(close_btn)
+        vbox.addLayout(footer)
+
+        self.refresh_data()
+
+    def _build_todo_tab(self) -> None:
+        tab = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(tab)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+
+        # Filter bar
+        f_row = QtWidgets.QHBoxLayout()
+        f_lbl = QtWidgets.QLabel("View:")
+        f_lbl.setStyleSheet("font-weight: bold; color: #94a3b8; font-size: 12px;")
+        f_row.addWidget(f_lbl)
+
+        self._f_pending_btn = QtWidgets.QPushButton("Pending")
+        self._f_pending_btn.setCheckable(True)
+        self._f_pending_btn.setChecked(True)
+        self._f_pending_btn.clicked.connect(lambda: self._set_todo_filter("pending"))
+        f_row.addWidget(self._f_pending_btn)
+
+        self._f_completed_btn = QtWidgets.QPushButton("Completed")
+        self._f_completed_btn.setCheckable(True)
+        self._f_completed_btn.clicked.connect(lambda: self._set_todo_filter("completed"))
+        f_row.addWidget(self._f_completed_btn)
+
+        self._f_all_btn = QtWidgets.QPushButton("All")
+        self._f_all_btn.setCheckable(True)
+        self._f_all_btn.clicked.connect(lambda: self._set_todo_filter("all"))
+        f_row.addWidget(self._f_all_btn)
+
+        f_row.addStretch(1)
+
+        self._clear_done_btn = QtWidgets.QPushButton("🧹 Clear Completed")
+        self._clear_done_btn.setStyleSheet(
+            "QPushButton{background:#334155;color:#e2e8f0;border-radius:6px;padding:4px 10px;font-size:11px;}"
+            "QPushButton:hover{background:#475569;color:#fff;}"
+        )
+        self._clear_done_btn.clicked.connect(self._clear_completed_todos)
+        f_row.addWidget(self._clear_done_btn)
+        layout.addLayout(f_row)
+
+        # Scroll area for items
+        self._todo_scroll = QtWidgets.QScrollArea()
+        self._todo_scroll.setWidgetResizable(True)
+        self._todo_container = QtWidgets.QWidget()
+        self._todo_layout = QtWidgets.QVBoxLayout(self._todo_container)
+        self._todo_layout.setContentsMargins(4, 4, 4, 4)
+        self._todo_layout.setSpacing(8)
+        self._todo_layout.addStretch(1)
+        self._todo_scroll.setWidget(self._todo_container)
+        layout.addWidget(self._todo_scroll, 1)
+
+        # Add task input row
+        add_box = QtWidgets.QFrame()
+        add_box.setStyleSheet("background:#111827;border:1px solid #1e293b;border-radius:8px;padding:6px;")
+        add_layout = QtWidgets.QHBoxLayout(add_box)
+        add_layout.setContentsMargins(6, 6, 6, 6)
+        add_layout.setSpacing(8)
+
+        self._new_todo_input = QtWidgets.QLineEdit()
+        self._new_todo_input.setPlaceholderText("+ Add a new task (e.g. Finish client presentation)...")
+        self._new_todo_input.returnPressed.connect(self._on_add_todo)
+        add_layout.addWidget(self._new_todo_input, 1)
+
+        self._new_todo_pri = QtWidgets.QComboBox()
+        self._new_todo_pri.addItems(["Medium", "High", "Low"])
+        add_layout.addWidget(self._new_todo_pri)
+
+        self._new_todo_cat = QtWidgets.QComboBox()
+        self._new_todo_cat.addItems(["General", "Work", "Personal", "Study", "Shopping"])
+        add_layout.addWidget(self._new_todo_cat)
+
+        add_btn = QtWidgets.QPushButton("+ Add")
+        add_btn.setStyleSheet(
+            "QPushButton{background:#0284c7;color:#fff;font-weight:bold;border:none;border-radius:6px;padding:6px 14px;}"
+            "QPushButton:hover{background:#0369a1;}"
+        )
+        add_btn.clicked.connect(self._on_add_todo)
+        add_layout.addWidget(add_btn)
+        layout.addWidget(add_box)
+
+        self._tabs.addTab(tab, "📝 To-Do List")
+
+    def _build_alarms_tab(self) -> None:
+        tab = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(tab)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(12)
+
+        # Section 1: Alarms
+        alm_hdr = QtWidgets.QHBoxLayout()
+        alm_title = QtWidgets.QLabel("⏰ Active Alarms")
+        alm_title.setStyleSheet("font-size: 14px; font-weight: bold; color: #38bdf8;")
+        alm_hdr.addWidget(alm_title)
+        alm_hdr.addStretch(1)
+        layout.addLayout(alm_hdr)
+
+        # Add Alarm input row
+        alm_add_box = QtWidgets.QFrame()
+        alm_add_box.setStyleSheet("background:#111827;border:1px solid #1e293b;border-radius:8px;padding:4px;")
+        alm_add_layout = QtWidgets.QHBoxLayout(alm_add_box)
+        alm_add_layout.setContentsMargins(6, 6, 6, 6)
+        alm_add_layout.setSpacing(8)
+
+        self._alm_time_input = QtWidgets.QLineEdit()
+        self._alm_time_input.setPlaceholderText("Time (e.g. 07:30 or 7:00 AM)")
+        self._alm_time_input.setFixedWidth(140)
+        alm_add_layout.addWidget(self._alm_time_input)
+
+        self._alm_label_input = QtWidgets.QLineEdit()
+        self._alm_label_input.setPlaceholderText("Label (e.g. Morning Standup)")
+        self._alm_label_input.returnPressed.connect(self._on_add_alarm)
+        alm_add_layout.addWidget(self._alm_label_input, 1)
+
+        alm_btn = QtWidgets.QPushButton("+ Set Alarm")
+        alm_btn.setStyleSheet(
+            "QPushButton{background:#0284c7;color:#fff;font-weight:bold;border:none;border-radius:6px;padding:6px 12px;}"
+            "QPushButton:hover{background:#0369a1;}"
+        )
+        alm_btn.clicked.connect(self._on_add_alarm)
+        alm_add_layout.addWidget(alm_btn)
+        layout.addWidget(alm_add_box)
+
+        # Alarms scroll area
+        self._alarms_scroll = QtWidgets.QScrollArea()
+        self._alarms_scroll.setWidgetResizable(True)
+        self._alarms_container = QtWidgets.QWidget()
+        self._alarms_layout = QtWidgets.QVBoxLayout(self._alarms_container)
+        self._alarms_layout.setContentsMargins(4, 4, 4, 4)
+        self._alarms_layout.setSpacing(6)
+        self._alarms_layout.addStretch(1)
+        self._alarms_scroll.setWidget(self._alarms_container)
+        self._alarms_scroll.setFixedHeight(130)
+        layout.addWidget(self._alarms_scroll)
+
+        # Section 2: Reminders
+        rem_hdr = QtWidgets.QHBoxLayout()
+        rem_title = QtWidgets.QLabel("📌 Scheduled Reminders")
+        rem_title.setStyleSheet("font-size: 14px; font-weight: bold; color: #a78bfa;")
+        rem_hdr.addWidget(rem_title)
+        rem_hdr.addStretch(1)
+        layout.addLayout(rem_hdr)
+
+        # Add Reminder row
+        rem_add_box = QtWidgets.QFrame()
+        rem_add_box.setStyleSheet("background:#111827;border:1px solid #1e293b;border-radius:8px;padding:4px;")
+        rem_add_layout = QtWidgets.QHBoxLayout(rem_add_box)
+        rem_add_layout.setContentsMargins(6, 6, 6, 6)
+        rem_add_layout.setSpacing(8)
+
+        self._rem_msg_input = QtWidgets.QLineEdit()
+        self._rem_msg_input.setPlaceholderText("Reminder note (e.g. Drink water)...")
+        rem_add_layout.addWidget(self._rem_msg_input, 1)
+
+        self._rem_time_input = QtWidgets.QLineEdit()
+        self._rem_time_input.setPlaceholderText("When (in 15m, 4:30 pm)...")
+        self._rem_time_input.setFixedWidth(150)
+        self._rem_time_input.returnPressed.connect(self._on_add_reminder)
+        rem_add_layout.addWidget(self._rem_time_input)
+
+        rem_btn = QtWidgets.QPushButton("+ Set Reminder")
+        rem_btn.setStyleSheet(
+            "QPushButton{background:#7c3aed;color:#fff;font-weight:bold;border:none;border-radius:6px;padding:6px 12px;}"
+            "QPushButton:hover{background:#6d28d9;}"
+        )
+        rem_btn.clicked.connect(self._on_add_reminder)
+        rem_add_layout.addWidget(rem_btn)
+        layout.addWidget(rem_add_box)
+
+        # Reminders scroll area
+        self._rems_scroll = QtWidgets.QScrollArea()
+        self._rems_scroll.setWidgetResizable(True)
+        self._rems_container = QtWidgets.QWidget()
+        self._rems_layout = QtWidgets.QVBoxLayout(self._rems_container)
+        self._rems_layout.setContentsMargins(4, 4, 4, 4)
+        self._rems_layout.setSpacing(6)
+        self._rems_layout.addStretch(1)
+        self._rems_scroll.setWidget(self._rems_container)
+        layout.addWidget(self._rems_scroll, 1)
+
+        self._tabs.addTab(tab, "⏰ Alarms & Reminders")
+
+    def _set_todo_filter(self, mode: str) -> None:
+        self._todo_filter = mode
+        self._f_pending_btn.setChecked(mode == "pending")
+        self._f_completed_btn.setChecked(mode == "completed")
+        self._f_all_btn.setChecked(mode == "all")
+        self.refresh_todos()
+
+    def refresh_data(self) -> None:
+        self.refresh_todos()
+        self.refresh_alarms()
+        self.refresh_reminders()
+
+    def refresh_todos(self) -> None:
+        # Clear existing widgets
+        while self._todo_layout.count() > 1:
+            item = self._todo_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        tm = task_manager.get_task_manager()
+        todos = tm.get_todos(self._todo_filter)
+
+        if not todos:
+            empty_lbl = QtWidgets.QLabel(f"No {self._todo_filter} tasks found. Type a task below to add one!")
+            empty_lbl.setStyleSheet("color:#64748b;font-style:italic;padding:16px;text-align:center;")
+            self._todo_layout.insertWidget(0, empty_lbl)
+            return
+
+        for todo in todos:
+            row = QtWidgets.QFrame()
+            row.setStyleSheet("QFrame{background:#111827;border:1px solid #1e293b;border-radius:6px;padding:4px;}"
+                              "QFrame:hover{border-color:#334155;}")
+            row_layout = QtWidgets.QHBoxLayout(row)
+            row_layout.setContentsMargins(8, 6, 8, 6)
+            row_layout.setSpacing(10)
+
+            # Checkbox
+            chk = QtWidgets.QCheckBox()
+            chk.setChecked(todo.completed)
+            chk.toggled.connect(lambda val, t_id=todo.id: self._on_toggle_todo(t_id, val))
+            row_layout.addWidget(chk)
+
+            # Priority badge
+            pri_col = {"high": "#ef4444", "low": "#10b981"}.get(todo.priority, "#f59e0b")
+            pri_badge = QtWidgets.QLabel(f" {todo.priority.upper()} ")
+            pri_badge.setStyleSheet(
+                f"background:{pri_col}22;color:{pri_col};border:1px solid {pri_col}66;"
+                f"border-radius:4px;font-size:10px;font-weight:bold;padding:1px 3px;"
+            )
+            row_layout.addWidget(pri_badge)
+
+            # Title
+            title_text = f"<s>{html.escape(todo.title)}</s>" if todo.completed else html.escape(todo.title)
+            title_lbl = QtWidgets.QLabel(title_text)
+            title_lbl.setStyleSheet(f"font-size:13px;{'color:#64748b;' if todo.completed else 'color:#f8fafc;'}")
+            row_layout.addWidget(title_lbl, 1)
+
+            # Category tag
+            cat_lbl = QtWidgets.QLabel(f"#{todo.category}")
+            cat_lbl.setStyleSheet("color:#64748b;font-size:11px;")
+            row_layout.addWidget(cat_lbl)
+
+            # Delete button
+            del_btn = QtWidgets.QPushButton("🗑️")
+            del_btn.setFixedSize(26, 26)
+            del_btn.setStyleSheet("QPushButton{background:transparent;border:none;font-size:13px;}"
+                                  "QPushButton:hover{background:#334155;border-radius:4px;}")
+            del_btn.clicked.connect(lambda _, t_id=todo.id: self._on_delete_todo(t_id))
+            row_layout.addWidget(del_btn)
+
+            self._todo_layout.insertWidget(self._todo_layout.count() - 1, row)
+
+    def refresh_alarms(self) -> None:
+        while self._alarms_layout.count() > 1:
+            item = self._alarms_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        tm = task_manager.get_task_manager()
+        alarms = tm.get_alarms()
+
+        if not alarms:
+            empty_lbl = QtWidgets.QLabel("No alarms set. Add one above!")
+            empty_lbl.setStyleSheet("color:#64748b;font-style:italic;padding:8px;")
+            self._alarms_layout.insertWidget(0, empty_lbl)
+            return
+
+        for alm in alarms:
+            card = QtWidgets.QFrame()
+            card.setStyleSheet("QFrame{background:#111827;border:1px solid #1e293b;border-radius:6px;padding:4px;}")
+            card_layout = QtWidgets.QHBoxLayout(card)
+            card_layout.setContentsMargins(8, 4, 8, 4)
+            card_layout.setSpacing(10)
+
+            time_lbl = QtWidgets.QLabel(alm.time_str)
+            time_lbl.setStyleSheet(f"font-size:15px;font-weight:bold;{'color:#38bdf8;' if alm.enabled else 'color:#64748b;'}")
+            card_layout.addWidget(time_lbl)
+
+            lbl = QtWidgets.QLabel(alm.label)
+            lbl.setStyleSheet(f"font-size:12px;{'color:#f8fafc;' if alm.enabled else 'color:#64748b;'}")
+            card_layout.addWidget(lbl, 1)
+
+            days_lbl = QtWidgets.QLabel("Everyday" if "all" in alm.days else ", ".join(alm.days))
+            days_lbl.setStyleSheet("color:#64748b;font-size:11px;")
+            card_layout.addWidget(days_lbl)
+
+            # Toggle button
+            tog_btn = QtWidgets.QPushButton("ON" if alm.enabled else "OFF")
+            tog_btn.setFixedSize(45, 24)
+            tog_btn.setStyleSheet(
+                f"QPushButton{{background:{'#22c55e' if alm.enabled else '#334155'};color:#fff;"
+                f"border:none;border-radius:12px;font-size:11px;font-weight:bold;}}"
+            )
+            tog_btn.clicked.connect(lambda _, a_id=alm.id: self._on_toggle_alarm(a_id))
+            card_layout.addWidget(tog_btn)
+
+            del_btn = QtWidgets.QPushButton("🗑️")
+            del_btn.setFixedSize(24, 24)
+            del_btn.setStyleSheet("QPushButton{background:transparent;border:none;font-size:12px;}"
+                                  "QPushButton:hover{background:#334155;border-radius:4px;}")
+            del_btn.clicked.connect(lambda _, a_id=alm.id: self._on_delete_alarm(a_id))
+            card_layout.addWidget(del_btn)
+
+            self._alarms_layout.insertWidget(self._alarms_layout.count() - 1, card)
+
+    def refresh_reminders(self) -> None:
+        while self._rems_layout.count() > 1:
+            item = self._rems_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        tm = task_manager.get_task_manager()
+        rems = tm.get_reminders("pending")
+
+        if not rems:
+            empty_lbl = QtWidgets.QLabel("No pending reminders. Set one above!")
+            empty_lbl.setStyleSheet("color:#64748b;font-style:italic;padding:8px;")
+            self._rems_layout.insertWidget(0, empty_lbl)
+            return
+
+        for rem in rems:
+            card = QtWidgets.QFrame()
+            card.setStyleSheet("QFrame{background:#111827;border:1px solid #1e293b;border-radius:6px;padding:4px;}")
+            card_layout = QtWidgets.QHBoxLayout(card)
+            card_layout.setContentsMargins(8, 4, 8, 4)
+            card_layout.setSpacing(10)
+
+            msg_lbl = QtWidgets.QLabel(rem.message)
+            msg_lbl.setStyleSheet("font-size:13px;color:#f8fafc;")
+            card_layout.addWidget(msg_lbl, 1)
+
+            target_iso = rem.snoozed_until or rem.due_time
+            try:
+                target_dt = datetime.fromisoformat(target_iso)
+                diff = target_dt - datetime.now()
+                if diff.total_seconds() > 0:
+                    mins = int(diff.total_seconds() // 60)
+                    time_txt = f"in {mins}m" if mins < 60 else f"in {mins // 60}h {mins % 60}m"
+                else:
+                    time_txt = "due now"
+            except Exception:
+                time_txt = target_iso
+
+            time_lbl = QtWidgets.QLabel(time_txt)
+            time_lbl.setStyleSheet("color:#a78bfa;font-size:11px;font-weight:bold;")
+            card_layout.addWidget(time_lbl)
+
+            snooze_btn = QtWidgets.QPushButton("⏳ 5m")
+            snooze_btn.setFixedSize(45, 24)
+            snooze_btn.setStyleSheet("QPushButton{background:#334155;color:#38bdf8;border:none;border-radius:6px;font-size:11px;}"
+                                     "QPushButton:hover{background:#475569;}")
+            snooze_btn.clicked.connect(lambda _, r_id=rem.id: self._on_snooze_reminder(r_id))
+            card_layout.addWidget(snooze_btn)
+
+            done_btn = QtWidgets.QPushButton("✓ Done")
+            done_btn.setFixedSize(55, 24)
+            done_btn.setStyleSheet("QPushButton{background:#16a34a;color:#fff;border:none;border-radius:6px;font-size:11px;font-weight:bold;}"
+                                   "QPushButton:hover{background:#15803d;}")
+            done_btn.clicked.connect(lambda _, r_id=rem.id: self._on_dismiss_reminder(r_id))
+            card_layout.addWidget(done_btn)
+
+            self._rems_layout.insertWidget(self._rems_layout.count() - 1, card)
+
+    def _on_add_todo(self) -> None:
+        title = self._new_todo_input.text().strip()
+        if not title:
+            return
+        pri = self._new_todo_pri.currentText().lower()
+        cat = self._new_todo_cat.currentText().lower()
+        task_manager.get_task_manager().add_todo(title, priority=pri, category=cat)
+        self._new_todo_input.clear()
+        self.refresh_todos()
+        if self._on_data_changed:
+            self._on_data_changed()
+
+    def _on_toggle_todo(self, todo_id: str, completed: bool) -> None:
+        tm = task_manager.get_task_manager()
+        for t in tm.todos:
+            if t.id == todo_id:
+                t.completed = completed
+                t.completed_at = datetime.now().isoformat() if completed else None
+                tm.save()
+                break
+        self.refresh_todos()
+        if self._on_data_changed:
+            self._on_data_changed()
+
+    def _on_delete_todo(self, todo_id: str) -> None:
+        task_manager.get_task_manager().delete_todo(todo_id)
+        self.refresh_todos()
+        if self._on_data_changed:
+            self._on_data_changed()
+
+    def _clear_completed_todos(self) -> None:
+        task_manager.get_task_manager().clear_completed_todos()
+        self.refresh_todos()
+        if self._on_data_changed:
+            self._on_data_changed()
+
+    def _on_add_alarm(self) -> None:
+        t_str = self._alm_time_input.text().strip()
+        if not t_str:
+            return
+        lbl = self._alm_label_input.text().strip() or "Alarm"
+        task_manager.get_task_manager().add_alarm(t_str, label=lbl)
+        self._alm_time_input.clear()
+        self._alm_label_input.clear()
+        self.refresh_alarms()
+        if self._on_data_changed:
+            self._on_data_changed()
+
+    def _on_toggle_alarm(self, alarm_id: str) -> None:
+        task_manager.get_task_manager().toggle_alarm(alarm_id)
+        self.refresh_alarms()
+        if self._on_data_changed:
+            self._on_data_changed()
+
+    def _on_delete_alarm(self, alarm_id: str) -> None:
+        task_manager.get_task_manager().delete_alarm(alarm_id)
+        self.refresh_alarms()
+        if self._on_data_changed:
+            self._on_data_changed()
+
+    def _on_add_reminder(self) -> None:
+        msg = self._rem_msg_input.text().strip()
+        t_expr = self._rem_time_input.text().strip()
+        if not msg or not t_expr:
+            return
+        dt, rec = task_manager.parse_natural_datetime(t_expr)
+        if not dt:
+            self._rem_time_input.setText("Invalid time")
+            return
+        task_manager.get_task_manager().add_reminder(msg, due_time=dt, recurrence=rec)
+        self._rem_msg_input.clear()
+        self._rem_time_input.clear()
+        self.refresh_reminders()
+        if self._on_data_changed:
+            self._on_data_changed()
+
+    def _on_snooze_reminder(self, reminder_id: str) -> None:
+        task_manager.get_task_manager().snooze_reminder(reminder_id, minutes=5)
+        self.refresh_reminders()
+        if self._on_data_changed:
+            self._on_data_changed()
+
+    def _on_dismiss_reminder(self, reminder_id: str) -> None:
+        task_manager.get_task_manager().dismiss_reminder(reminder_id)
+        self.refresh_reminders()
+        if self._on_data_changed:
+            self._on_data_changed()
 
 
 # ============================================================
@@ -3962,6 +4673,7 @@ class DesktopCompanionApp(QtCore.QObject):
         self.character.system_tools_toggled.connect(self.toggle_system_tools)
         self.character.all_drives_toggled.connect(self.toggle_all_drives)
         self.character.provider_change_requested.connect(self.switch_provider)
+        self.character.tasks_requested.connect(self.open_tasks_dialog)
         self.character.reset_pos_requested.connect(self.reset_position)
         self.character.hide_requested.connect(self.hide_character)
         self.character.quit_requested.connect(self.quit_app)
@@ -3972,12 +4684,23 @@ class DesktopCompanionApp(QtCore.QObject):
         self.popup.stop_requested.connect(self.stop_streaming)
         self.popup.clear_requested.connect(self.clear_conversation)
         self.popup.settings_requested.connect(self.open_settings)
+        self.popup.tasks_requested.connect(self.open_tasks_dialog)
         self.popup.briefing_requested.connect(self.fetch_live_briefing)
         self.popup.mock_mode_requested.connect(lambda: self.switch_provider("mock"))
         self.popup.provider_switch_requested.connect(
             lambda p, m: self.switch_provider(p, m or None)
         )
         self.popup.enable_web_tools_requested.connect(lambda: self.toggle_web_tools(True))
+
+        # Alert popup & tasks dialog
+        self._alert_popup: Optional[AlertNotificationPopup] = None
+        self._tasks_dialog: Optional[TasksDialog] = None
+
+        # 2-second background timer checking for due alarms and reminders
+        self._reminder_timer = QtCore.QTimer(self.character)
+        self._reminder_timer.setInterval(2000)
+        self._reminder_timer.timeout.connect(self._check_reminders_and_alarms)
+        self._reminder_timer.start()
 
         # Single-instance listener
         self._instance_guard: Optional[SingleInstanceGuard] = None
@@ -4004,6 +4727,7 @@ class DesktopCompanionApp(QtCore.QObject):
         menu = QtWidgets.QMenu(self.character)
         menu.addAction("Show / Toggle Chat", self.summon_from_hotkey)
         menu.addAction("Greet Me / Daily Topics", self.greet_now)
+        menu.addAction("📋 Tasks & Reminders...", self.open_tasks_dialog)
         menu.addAction("Show Character", self.show_character)
         menu.addAction("Customize Character...", self.open_settings)
         menu.addAction("Choose Character Avatar (Gallery)...", self.open_avatar_gallery)
@@ -4382,16 +5106,20 @@ class DesktopCompanionApp(QtCore.QObject):
                 if urls and txt:
                     return f"Clipboard text:\n{txt}\nClipboard files:\n" + "\n".join(urls)
             content = cb.text()
+            if not content and getattr(self, "_last_copied_files", None):
+                return "Clipboard files:\n" + "\n".join(self._last_copied_files)
             return content if content else "(Clipboard is empty)"
         if action == "set":
             cb.setText(text)
             QtWidgets.QApplication.processEvents()
             return f"Copied {len(text)} character(s) to clipboard."
         if action == "copy_files":
+            self._last_copied_files = list(paths)
             mime = QtCore.QMimeData()
             mime.setUrls([QtCore.QUrl.fromLocalFile(p) for p in paths])
             mime.setText("\n".join(paths))
             cb.setMimeData(mime)
+            cb.setText("\n".join(paths))
             QtWidgets.QApplication.processEvents()
             return (
                 f"Copied {len(paths)} file/folder path(s) to Windows clipboard "
@@ -4515,6 +5243,94 @@ class DesktopCompanionApp(QtCore.QObject):
             self._apply_updated_config(dlg.updated_config(), refresh_keys=keys_changed)
             self.character.set_state("happy")
             self.character.show_speech_bubble(f"Updated! I'm {self._config.character_name}.")
+
+    def open_tasks_dialog(self) -> None:
+        """Open the interactive Tasks, Alarms & Reminders management dialog."""
+        if self._tasks_dialog is None:
+            self._tasks_dialog = TasksDialog(
+                parent=self.popup if self.popup.isVisible() else self.character,
+                config=self._config,
+                on_data_changed=self._on_tasks_data_changed,
+            )
+        self._tasks_dialog.refresh_data()
+        self._tasks_dialog.show()
+        self._tasks_dialog.raise_()
+        self._tasks_dialog.activateWindow()
+
+    def _on_tasks_data_changed(self) -> None:
+        if hasattr(self, "popup") and self.popup:
+            self.popup.apply_config(self._config)
+
+    def _check_reminders_and_alarms(self) -> None:
+        try:
+            tm = task_manager.get_task_manager()
+            due_rems, due_alms = tm.check_due_items()
+            for rem in due_rems:
+                self._trigger_reminder_alert(rem)
+            for alm in due_alms:
+                self._trigger_alarm_alert(alm)
+        except Exception:
+            pass
+
+    def _trigger_reminder_alert(self, rem: Any) -> None:
+        self.character.show()
+        self.character.set_state("happy")
+        self.character.show_speech_bubble(f"⏰ Reminder: {rem.message}", duration_ms=9000)
+        play_alert_sound("reminder", enabled=getattr(self._config, "alert_sound_enabled", True))
+
+        if self._alert_popup:
+            self._alert_popup.close()
+        preset = get_character_preset(self._config.character_id)
+        self._alert_popup = AlertNotificationPopup(
+            title="⏰ Reminder",
+            message=rem.message,
+            target_id=rem.id,
+            is_alarm=False,
+            accent_color=preset.accent_color,
+            on_done=lambda: task_manager.get_task_manager().dismiss_reminder(rem.id),
+            on_snooze=lambda mins: self._snooze_reminder(rem.id, mins),
+        )
+        self._position_alert_popup(self._alert_popup)
+        self._alert_popup.show()
+
+    def _trigger_alarm_alert(self, alm: Any) -> None:
+        self.character.show()
+        self.character.set_state("happy")
+        self.character.show_speech_bubble(f"🚨 ALARM: {alm.label} ({alm.time_str})", duration_ms=10000)
+        play_alert_sound("alarm", enabled=getattr(self._config, "alert_sound_enabled", True))
+
+        if self._alert_popup:
+            self._alert_popup.close()
+        self._alert_popup = AlertNotificationPopup(
+            title="🚨 Alarm",
+            message=f"{alm.label} - {alm.time_str}",
+            target_id=alm.id,
+            is_alarm=True,
+            accent_color="#ef4444",
+            on_done=lambda: setattr(alm, "status", "dismissed"),
+            on_snooze=lambda mins: self._snooze_alarm(alm, mins),
+        )
+        self._position_alert_popup(self._alert_popup)
+        self._alert_popup.show()
+
+    def _snooze_reminder(self, rem_id: str, minutes: int = 5) -> None:
+        task_manager.get_task_manager().snooze_reminder(rem_id, minutes=minutes)
+        self.character.show_speech_bubble(f"Snoozed for {minutes} min!", duration_ms=4000)
+
+    def _snooze_alarm(self, alm: Any, minutes: int = 5) -> None:
+        snooze_dt = datetime.now() + timedelta(minutes=minutes)
+        task_manager.get_task_manager().add_reminder(f"Snoozed Alarm: {alm.label}", due_time=snooze_dt)
+        self.character.show_speech_bubble(f"Alarm snoozed {minutes}m!", duration_ms=4000)
+
+    def _position_alert_popup(self, popup: QtWidgets.QWidget) -> None:
+        char_rect = self.character.geometry()
+        screen = QtGui.QGuiApplication.primaryScreen()
+        avail = screen.availableGeometry() if screen else QtCore.QRect(0, 0, 1920, 1080)
+        x = char_rect.left() - popup.width() - 10
+        if x < avail.left():
+            x = char_rect.right() + 10
+        y = max(avail.top() + 10, min(char_rect.top(), avail.bottom() - popup.height() - 10))
+        popup.move(x, y)
 
     def clear_conversation(self) -> None:
         if self._worker_thread is not None and self._worker_thread.isRunning():

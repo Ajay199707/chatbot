@@ -2,6 +2,7 @@
 .env
 character_config.json
 custom_apis.json
+reminders_and_tasks.json
 
 # PyInstaller / executable build artifacts
 build/

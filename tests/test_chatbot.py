@@ -741,3 +741,40 @@ def test_openai_and_deepseek_providers_streaming_and_reasoning(monkeypatch):
     assert st["keys_configured"]["openai"] is True
     assert st["keys_configured"]["deepseek"] is True
     assert "openai" in st["models"] and "deepseek" in st["models"]
+
+
+def test_task_and_reminder_tools_in_chatbot(tmp_path, monkeypatch):
+    import task_manager
+    test_db = tmp_path / "bot_tasks.json"
+    tm = task_manager.TaskManager(str(test_db))
+    monkeypatch.setattr(task_manager, "get_task_manager", lambda: tm)
+
+    bot = chatbot.Chatbot(chatbot.ChatbotConfig(provider="mock", use_tools=True))
+
+    # Add task via mock turn
+    evs1 = list(bot.stream_turn("add buy organic apples to my todo list"))
+    assert any(e.get("type") == "tool_start" and e.get("name") == "add_todo" for e in evs1)
+    assert len(tm.get_todos()) == 1
+    assert "apples" in tm.get_todos()[0].title
+
+    # Show todo list
+    evs2 = list(bot.stream_turn("show my todo list"))
+    assert any(e.get("type") == "tool_start" and e.get("name") == "list_todos" for e in evs2)
+
+    # Set reminder
+    evs3 = list(bot.stream_turn("remind me to check mail in 10 minutes"))
+    assert any(e.get("type") == "tool_start" and e.get("name") == "set_reminder" for e in evs3)
+    assert len(tm.get_reminders()) == 1
+
+    # Set alarm
+    evs4 = list(bot.stream_turn("set alarm for 07:30 am"))
+    assert any(e.get("type") == "tool_start" and e.get("name") == "set_alarm" for e in evs4)
+    assert len(tm.get_alarms()) == 1
+
+    # Execute tool directly through execute_tool
+    res = chatbot.execute_tool("complete_todo", {"query": "apples"})
+    assert "Completed task" in res
+    assert tm.get_todos("all")[0].completed is True
+    assert len(tm.get_todos("pending")) == 0
+    assert len(tm.get_todos("completed")) == 1
+

@@ -48,6 +48,7 @@ import uvicorn
 
 import api_tools
 import system_tools
+import task_manager
 
 try:
     from dotenv import load_dotenv
@@ -287,6 +288,19 @@ DEFAULT_SYSTEM_PROMPT = (
 )
 
 
+def _resolve_system_prompt_with_context(prompt: str) -> str:
+    now_str = datetime.now().strftime("%A, %b %d, %Y, %I:%M %p")
+    ctx = (
+        f"\n\n[Current System Context: Today is {now_str}. "
+        "You have tools to manage to-do tasks (add_todo, list_todos, complete_todo), "
+        "reminders (set_reminder, list_reminders, dismiss_reminder), "
+        "and alarms (set_alarm, list_alarms, toggle_alarm). "
+        "When the user asks to be reminded or set a task/alarm, call the corresponding tool.]"
+    )
+    base = (prompt or DEFAULT_SYSTEM_PROMPT).strip()
+    return base + ctx
+
+
 # ============================================================
 # TOOLS & SCHEMAS
 # ============================================================
@@ -426,6 +440,7 @@ def _all_tool_specs(include_web: bool, include_system: bool) -> List[Dict[str, A
     if include_web:
         specs.extend(TOOL_SPECS)
         specs.extend(api_tools.get_api_tool_specs())
+        specs.extend(task_manager.TASK_TOOL_SPECS)
     if include_system:
         specs.extend(system_tools.SYSTEM_TOOL_SPECS)
     return specs
@@ -544,6 +559,15 @@ def execute_tool(
         try:
             res = api_tools.execute_api_tool(name, args, policy=api_policy)
             return res if res is not None else json.dumps({"error": f"Unknown tool: {name}"})
+        except TypeError as exc:
+            return json.dumps({"error": f"Invalid arguments for {name}: {exc}"})
+        except Exception as exc:
+            return json.dumps({"error": f"Tool {name} failed: {exc}"})
+
+    if name in task_manager.TASK_TOOL_FUNCTIONS:
+        try:
+            fn = task_manager.TASK_TOOL_FUNCTIONS[name]
+            return str(fn(**_filter_callable_kwargs(fn, args)))
         except TypeError as exc:
             return json.dumps({"error": f"Invalid arguments for {name}: {exc}"})
         except Exception as exc:
@@ -1297,10 +1321,10 @@ class Chatbot:
             "contents": contents,
             "generationConfig": generation_config,
         }
-        if self.config.system_prompt:
-            payload["system_instruction"] = {
-                "parts": [{"text": self.config.system_prompt}]
-            }
+        sys_instruction = _resolve_system_prompt_with_context(self.config.system_prompt)
+        payload["system_instruction"] = {
+            "parts": [{"text": sys_instruction}]
+        }
         if tools_enabled or include_system:
             payload["tools"] = build_gemini_tools(
                 include_system=include_system,
@@ -1475,8 +1499,8 @@ class Chatbot:
     # --------------------------------------------------------
     def _build_openai_messages(self) -> List[Dict[str, Any]]:
         messages: List[Dict[str, Any]] = []
-        if self.config.system_prompt:
-            messages.append({"role": "system", "content": self.config.system_prompt})
+        sys_prompt = _resolve_system_prompt_with_context(self.config.system_prompt)
+        messages.append({"role": "system", "content": sys_prompt})
         for msg in self.history:
             messages.append({"role": msg.role, "content": msg.content})
         return messages
@@ -1871,7 +1895,66 @@ class Chatbot:
                 tool_plan = ("list_directory", {"path": folder} if folder else {})
 
         if tool_plan is None and tools_enabled:
-            if any(kw in lower for kw in ("weather", "forecast", "temperature")):
+            # Alarms
+            alm_m = re.match(
+                r"^\s*(?:please\s+)?(?:set\s+(?:an?\s+)?)?alarm(?:\s+(?:for|at))?\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)(?:\s+(?:for|labeled|called|named)\s+(.+?))?\s*[?.!]*$",
+                user_input,
+                re.IGNORECASE,
+            ) or re.match(
+                r"^\s*(?:please\s+)?wake\s+me\s+up\s+at\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)\s*[?.!]*$",
+                user_input,
+                re.IGNORECASE,
+            )
+            if alm_m:
+                t_str = alm_m.group(1).strip()
+                lbl = alm_m.group(2).strip() if (len(alm_m.groups()) >= 2 and alm_m.group(2)) else "Alarm"
+                tool_plan = ("set_alarm", {"time_str": t_str, "label": lbl})
+            elif any(kw in lower for kw in ("show alarm", "list alarm", "my alarm", "view alarm", "what alarm", "check alarm")):
+                tool_plan = ("list_alarms", {})
+
+            # Reminders
+            elif any(lower.startswith(p) for p in ("remind me to", "remind me about", "set reminder", "set a reminder", "add reminder", "remind me")):
+                rem_m = re.match(
+                    r"^\s*(?:please\s+)?(?:set\s+(?:a\s+)?)?remind(?:er)?(?:\s+me)?\s+(?:to\s+|about\s+)?(.+?)\s+(?:in|at|after|tomorrow|today|everyday|on)\s+(.+?)\s*[?.!]*$",
+                    user_input,
+                    re.IGNORECASE,
+                )
+                if rem_m and rem_m.group(1).strip() and rem_m.group(2).strip():
+                    tool_plan = ("set_reminder", {"message": rem_m.group(1).strip(), "time_expr": rem_m.group(2).strip()})
+                else:
+                    cleaned = re.sub(r"^\s*(?:please\s+)?(?:set\s+(?:a\s+)?)?remind(?:er)?(?:\s+me)?\s+(?:to\s+|about\s+)?", "", user_input, flags=re.IGNORECASE).strip(" ?.:,")
+                    tool_plan = ("set_reminder", {"message": cleaned or "Reminder", "time_expr": "in 10 minutes"})
+            elif any(kw in lower for kw in ("show reminder", "list reminder", "my reminder", "view reminder", "what reminder", "check reminder")):
+                tool_plan = ("list_reminders", {"status": "pending"})
+            elif any(lower.startswith(p) for p in ("dismiss reminder", "cancel reminder", "remove reminder")):
+                rem_q = re.sub(r"^(?:dismiss|cancel|remove)\s+reminder\s*", "", user_input, flags=re.IGNORECASE).strip(" ?.:,")
+                tool_plan = ("dismiss_reminder", {"query": rem_q or "all"})
+
+            # To-Do List
+            elif any(lower.startswith(p) for p in ("add todo", "add to do", "add to-do", "add task", "new task", "new todo", "remember to ")):
+                task_title = re.sub(
+                    r"^\s*(?:please\s+)?(?:add\s+(?:to\s+(?:my\s+)?)?(?:todo|to-do|to\s+do|task)(?:\s+list)?\s*:?\s*|remember\s+to\s+|new\s+task\s*:?\s*|new\s+todo\s*:?\s*)",
+                    "",
+                    user_input,
+                    flags=re.IGNORECASE,
+                ).strip(" ?.:,")
+                if task_title:
+                    tool_plan = ("add_todo", {"title": task_title})
+            elif re.search(r"\badd\s+(.+?)\s+to\s+(?:my\s+)?(?:todo|to-do|to\s+do|task)\s*(?:list)?\s*[?.!]*$", user_input, re.IGNORECASE):
+                m_add = re.search(r"\badd\s+(.+?)\s+to\s+(?:my\s+)?(?:todo|to-do|to\s+do|task)\s*(?:list)?\s*[?.!]*$", user_input, re.IGNORECASE)
+                if m_add and m_add.group(1).strip():
+                    tool_plan = ("add_todo", {"title": m_add.group(1).strip()})
+            elif any(kw in lower for kw in ("show todo", "list todo", "my todo", "todo list", "to-do list", "show task", "list task", "my task", "pending task", "what are my task")):
+                tool_plan = ("list_todos", {"filter_mode": "pending"})
+            elif any(lower.startswith(p) for p in ("complete task", "done task", "finish task", "mark task", "mark done")):
+                task_q = re.sub(r"^(?:complete|done|finish|mark)\s+(?:task\s+)?(?:as\s+done\s+)?", "", user_input, flags=re.IGNORECASE).strip(" ?.:,")
+                if task_q:
+                    tool_plan = ("complete_todo", {"query": task_q})
+            elif any(lower.startswith(p) for p in ("delete task", "remove task", "clear completed")):
+                task_q = re.sub(r"^(?:delete|remove)\s+(?:task\s+)?", "", user_input, flags=re.IGNORECASE).strip(" ?.:,")
+                tool_plan = ("delete_todo", {"query": task_q or "completed"})
+
+            elif any(kw in lower for kw in ("weather", "forecast", "temperature")):
                 wm = re.search(
                     r"(?:weather|forecast|temperature)\s+(?:today\s+|now\s+|currently\s+)?(?:in|at|for|of)\s+(.+?)\s*[?.!]*$",
                     user_input,
