@@ -772,9 +772,60 @@ def test_task_and_reminder_tools_in_chatbot(tmp_path, monkeypatch):
     assert len(tm.get_alarms()) == 1
 
     # Execute tool directly through execute_tool
-    res = chatbot.execute_tool("complete_todo", {"query": "apples"})
+    res = chatbot.execute_tool("complete_tool" if False else "complete_todo", {"query": "apples"})
     assert "Completed task" in res
     assert tm.get_todos("all")[0].completed is True
     assert len(tm.get_todos("pending")) == 0
     assert len(tm.get_todos("completed")) == 1
+
+
+def test_pomodoro_mock_chat_routing(tmp_path, monkeypatch):
+    import task_manager
+    test_db = tmp_path / "bot_pomo.json"
+    tm = task_manager.TaskManager(str(test_db))
+    monkeypatch.setattr(task_manager, "get_task_manager", lambda: tm)
+
+    bot = chatbot.Chatbot(chatbot.ChatbotConfig(provider="mock", use_tools=True))
+
+    # Start Pomodoro
+    evs1 = list(bot.stream_turn("start 25 min pomodoro"))
+    assert any(e.get("type") == "tool_start" and e.get("name") == "start_pomodoro" for e in evs1)
+    assert tm.get_pomodoro_status()["status"] == "work"
+
+    # Status Pomodoro
+    evs2 = list(bot.stream_turn("what is my pomodoro status?"))
+    assert any(e.get("type") == "tool_start" and e.get("name") == "get_pomodoro_status" for e in evs2)
+
+    # Stop Pomodoro
+    evs3 = list(bot.stream_turn("stop pomodoro"))
+    assert any(e.get("type") == "tool_start" and e.get("name") == "stop_pomodoro" for e in evs3)
+    assert tm.get_pomodoro_status()["status"] == "idle"
+
+
+def test_screen_snipping_and_vision_multimodal_turn():
+    bot = chatbot.Chatbot(chatbot.ChatbotConfig(provider="mock", use_tools=False))
+
+    dummy_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    events = list(bot.stream_turn("what does this code on screen say?", images=[dummy_b64]))
+
+    # Verify thought and vision output
+    assert any(e.get("type") == "thought" and "Vision" in e.get("content", "") for e in events)
+    done_ev = next(e for e in events if e.get("type") == "done")
+    assert "Screen Snipping & Vision Analysis" in done_ev["content"]
+    assert bot.history[-1].role == "assistant"
+    assert bot.history[-2].images == [dummy_b64]
+
+
+def test_gemini_vision_payload_construction():
+    bot = chatbot.Chatbot(chatbot.ChatbotConfig(provider="gemini", model_name="gemini-2.5-flash"))
+    dummy_b64 = "QUJDREVG"
+    bot.add_message(chatbot.Message(role="user", content="Explain this chart", images=[dummy_b64]))
+
+    contents = bot._build_gemini_contents()
+    assert len(contents) == 1
+    parts = contents[0]["parts"]
+    assert len(parts) == 2
+    assert parts[0] == {"inlineData": {"mimeType": "image/png", "data": dummy_b64}}
+    assert parts[1] == {"text": "Explain this chart"}
+
 

@@ -117,6 +117,35 @@ class AlarmItem:
         )
 
 
+@dataclass
+class PomodoroState:
+    """Tracks state for Pomodoro Focus Sessions."""
+    status: str = "idle"  # "idle", "work", "break"
+    work_duration_minutes: int = 25
+    break_duration_minutes: int = 5
+    current_cycle: int = 1
+    total_completed_cycles: int = 0
+    remaining_seconds: int = 25 * 60
+    is_paused: bool = False
+    started_at: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> PomodoroState:
+        return cls(
+            status=str(data.get("status", "idle")),
+            work_duration_minutes=int(data.get("work_duration_minutes", 25)),
+            break_duration_minutes=int(data.get("break_duration_minutes", 5)),
+            current_cycle=int(data.get("current_cycle", 1)),
+            total_completed_cycles=int(data.get("total_completed_cycles", 0)),
+            remaining_seconds=int(data.get("remaining_seconds", 25 * 60)),
+            is_paused=bool(data.get("is_paused", False)),
+            started_at=data.get("started_at"),
+        )
+
+
 # ============================================================================
 # Natural Language Time Parser
 # ============================================================================
@@ -269,6 +298,7 @@ class TaskManager:
         self.todos: List[TodoItem] = []
         self.reminders: List[ReminderItem] = []
         self.alarms: List[AlarmItem] = []
+        self.pomodoro: PomodoroState = PomodoroState()
         self.load()
 
     # ------------------------------------------------------------------------
@@ -285,6 +315,11 @@ class TaskManager:
             self.todos = [TodoItem.from_dict(d) for d in data.get("todos", [])]
             self.reminders = [ReminderItem.from_dict(d) for d in data.get("reminders", [])]
             self.alarms = [AlarmItem.from_dict(d) for d in data.get("alarms", [])]
+            pomo_data = data.get("pomodoro")
+            if isinstance(pomo_data, dict):
+                self.pomodoro = PomodoroState.from_dict(pomo_data)
+            else:
+                self.pomodoro = PomodoroState()
         except Exception:
             # If corrupted, start with fresh lists but preserve existing file as backup
             backup = self._path.with_suffix(".corrupt.bak")
@@ -296,6 +331,7 @@ class TaskManager:
             self.todos = []
             self.reminders = []
             self.alarms = []
+            self.pomodoro = PomodoroState()
 
     def save(self) -> None:
         """Atomic write to disk to prevent partial corruption."""
@@ -304,6 +340,7 @@ class TaskManager:
             "todos": [t.to_dict() for t in self.todos],
             "reminders": [r.to_dict() for r in self.reminders],
             "alarms": [a.to_dict() for a in self.alarms],
+            "pomodoro": self.pomodoro.to_dict(),
         }
         self._path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self._path.with_suffix(".tmp")
@@ -470,6 +507,98 @@ class TaskManager:
             self.save()
             return True
         return False
+
+    # ------------------------------------------------------------------------
+    # Pomodoro Focus Timer Operations
+    # ------------------------------------------------------------------------
+
+    def start_pomodoro(
+        self,
+        work_minutes: int = 25,
+        break_minutes: int = 5,
+    ) -> Dict[str, Any]:
+        """Start or restart a Pomodoro focus session."""
+        wm = max(1, int(work_minutes))
+        bm = max(1, int(break_minutes))
+        self.pomodoro.status = "work"
+        self.pomodoro.work_duration_minutes = wm
+        self.pomodoro.break_duration_minutes = bm
+        self.pomodoro.remaining_seconds = wm * 60
+        self.pomodoro.is_paused = False
+        self.pomodoro.started_at = datetime.now().isoformat()
+        self.save()
+        return self.get_pomodoro_status()
+
+    def pause_pomodoro(self) -> Dict[str, Any]:
+        """Pause the active Pomodoro session."""
+        if self.pomodoro.status in ("work", "break"):
+            self.pomodoro.is_paused = True
+            self.save()
+        return self.get_pomodoro_status()
+
+    def resume_pomodoro(self) -> Dict[str, Any]:
+        """Resume a paused Pomodoro session."""
+        if self.pomodoro.status in ("work", "break"):
+            self.pomodoro.is_paused = False
+            self.save()
+        return self.get_pomodoro_status()
+
+    def stop_pomodoro(self) -> Dict[str, Any]:
+        """Stop and reset the Pomodoro session."""
+        self.pomodoro.status = "idle"
+        self.pomodoro.is_paused = False
+        self.pomodoro.remaining_seconds = self.pomodoro.work_duration_minutes * 60
+        self.save()
+        return self.get_pomodoro_status()
+
+    def get_pomodoro_status(self) -> Dict[str, Any]:
+        """Return the current Pomodoro state as a dictionary."""
+        rem = max(0, int(self.pomodoro.remaining_seconds))
+        mins = rem // 60
+        secs = rem % 60
+        formatted = f"{mins:02d}:{secs:02d}"
+        return {
+            "status": self.pomodoro.status,
+            "work_duration_minutes": self.pomodoro.work_duration_minutes,
+            "break_duration_minutes": self.pomodoro.break_duration_minutes,
+            "current_cycle": self.pomodoro.current_cycle,
+            "total_completed_cycles": self.pomodoro.total_completed_cycles,
+            "remaining_seconds": rem,
+            "remaining_formatted": formatted,
+            "is_paused": self.pomodoro.is_paused,
+            "started_at": self.pomodoro.started_at,
+        }
+
+    def tick_pomodoro(self, delta_seconds: int = 1) -> Dict[str, Any]:
+        """Advance Pomodoro clock by delta_seconds. Returns event info if transition occurs."""
+        if self.pomodoro.status == "idle" or self.pomodoro.is_paused:
+            return {"event": "none", "state": self.get_pomodoro_status()}
+
+        self.pomodoro.remaining_seconds = max(0, self.pomodoro.remaining_seconds - delta_seconds)
+
+        if self.pomodoro.remaining_seconds <= 0:
+            if self.pomodoro.status == "work":
+                self.pomodoro.total_completed_cycles += 1
+                self.pomodoro.status = "break"
+                self.pomodoro.remaining_seconds = self.pomodoro.break_duration_minutes * 60
+                self.save()
+                return {
+                    "event": "work_completed",
+                    "message": "Focus session completed! Great job! Time for a short break.",
+                    "state": self.get_pomodoro_status(),
+                }
+            elif self.pomodoro.status == "break":
+                self.pomodoro.current_cycle += 1
+                self.pomodoro.status = "idle"
+                self.pomodoro.remaining_seconds = self.pomodoro.work_duration_minutes * 60
+                self.save()
+                return {
+                    "event": "break_completed",
+                    "message": "Break finished! Ready to begin your next focus session.",
+                    "state": self.get_pomodoro_status(),
+                }
+
+        return {"event": "tick", "state": self.get_pomodoro_status()}
 
     # ------------------------------------------------------------------------
     # Due Checking (Active Heartbeat)
@@ -749,6 +878,39 @@ def tool_delete_alarm(alarm_id: str) -> str:
     return f"No alarm found matching '{alarm_id}'."
 
 
+def tool_start_pomodoro(work_minutes: int = 25, break_minutes: int = 5) -> str:
+    """Start or restart a Pomodoro focus timer."""
+    tm = get_task_manager()
+    st = tm.start_pomodoro(work_minutes=work_minutes, break_minutes=break_minutes)
+    return (
+        f"🍅 Pomodoro focus session started! Working for {st['work_duration_minutes']} minutes, "
+        f"followed by a {st['break_duration_minutes']}-minute break. Stay focused!"
+    )
+
+
+def tool_stop_pomodoro() -> str:
+    """Stop and reset the Pomodoro focus timer."""
+    tm = get_task_manager()
+    tm.stop_pomodoro()
+    return "⏹ Pomodoro focus session stopped and reset."
+
+
+def tool_get_pomodoro_status() -> str:
+    """Get the current Pomodoro session status and remaining time."""
+    tm = get_task_manager()
+    st = tm.get_pomodoro_status()
+    if st["status"] == "idle":
+        return (
+            f"🍅 Pomodoro is currently idle. Ready for a {st['work_duration_minutes']}-minute focus session. "
+            f"(Sessions completed today: {st['total_completed_cycles']})"
+        )
+    paused_str = " (PAUSED)" if st["is_paused"] else ""
+    return (
+        f"🍅 Pomodoro: {st['status'].upper()}{paused_str} | {st['remaining_formatted']} remaining "
+        f"(Cycle {st['current_cycle']}, Total completed: {st['total_completed_cycles']})"
+    )
+
+
 # Tool Specifications
 TASK_TOOL_SPECS: List[Dict[str, Any]] = [
     {
@@ -873,6 +1035,30 @@ TASK_TOOL_SPECS: List[Dict[str, Any]] = [
         },
         "required": ["alarm_id"],
         "fn": tool_delete_alarm,
+    },
+    {
+        "name": "start_pomodoro",
+        "description": "Start a Pomodoro focus timer session. Use when the user asks to start pomodoro, focus for 25 minutes, or begin study/work timer.",
+        "properties": {
+            "work_minutes": {"type": "integer", "description": "Focus session duration in minutes (default 25)."},
+            "break_minutes": {"type": "integer", "description": "Break duration in minutes (default 5)."},
+        },
+        "required": [],
+        "fn": tool_start_pomodoro,
+    },
+    {
+        "name": "stop_pomodoro",
+        "description": "Stop, cancel, or reset the active Pomodoro focus timer.",
+        "properties": {},
+        "required": [],
+        "fn": tool_stop_pomodoro,
+    },
+    {
+        "name": "get_pomodoro_status",
+        "description": "Check the status or remaining time of the Pomodoro focus timer.",
+        "properties": {},
+        "required": [],
+        "fn": tool_get_pomodoro_status,
     },
 ]
 

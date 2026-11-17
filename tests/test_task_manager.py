@@ -183,3 +183,74 @@ def test_daily_summary(tmp_path):
     assert summary["active_alarm_count"] == 1
     assert summary["today_reminder_count"] == 1
     assert "Call client" in summary["today_reminders"]
+
+
+def test_pomodoro_lifecycle_and_tick(tmp_path):
+    data_file = tmp_path / "test_pomodoro.json"
+    tm = TaskManager(str(data_file))
+
+    # Initial state
+    st = tm.get_pomodoro_status()
+    assert st["status"] == "idle"
+    assert st["total_completed_cycles"] == 0
+
+    # Start Pomodoro (1 minute work, 1 minute break for test speed)
+    st = tm.start_pomodoro(work_minutes=1, break_minutes=1)
+    assert st["status"] == "work"
+    assert st["remaining_seconds"] == 60
+    assert st["remaining_formatted"] == "01:00"
+
+    # Pause & resume
+    st_paused = tm.pause_pomodoro()
+    assert st_paused["is_paused"] is True
+    # Tick while paused should not advance
+    ev_paused = tm.tick_pomodoro(5)
+    assert ev_paused["event"] == "none"
+
+    st_resumed = tm.resume_pomodoro()
+    assert st_resumed["is_paused"] is False
+
+    # Tick 30 seconds
+    ev = tm.tick_pomodoro(30)
+    assert ev["event"] == "tick"
+    assert ev["state"]["remaining_seconds"] == 30
+
+    # Tick remaining 30 seconds -> transition to break
+    ev_done = tm.tick_pomodoro(30)
+    assert ev_done["event"] == "work_completed"
+    assert ev_done["state"]["status"] == "break"
+    assert ev_done["state"]["total_completed_cycles"] == 1
+    assert ev_done["state"]["remaining_seconds"] == 60
+
+    # Tick break to completion -> transition to idle
+    ev_break_done = tm.tick_pomodoro(60)
+    assert ev_break_done["event"] == "break_completed"
+    assert ev_break_done["state"]["status"] == "idle"
+    assert ev_break_done["state"]["current_cycle"] == 2
+
+    # Stop / reset
+    tm.start_pomodoro(work_minutes=25)
+    st_stop = tm.stop_pomodoro()
+    assert st_stop["status"] == "idle"
+
+
+def test_pomodoro_tools(tmp_path, monkeypatch):
+    import task_manager
+    data_file = tmp_path / "test_pomo_tools.json"
+    tm = TaskManager(str(data_file))
+    monkeypatch.setattr(task_manager, "get_task_manager", lambda: tm)
+
+    # Start tool
+    start_msg = task_manager.tool_start_pomodoro(work_minutes=25, break_minutes=5)
+    assert "Pomodoro focus session started" in start_msg
+    assert tm.get_pomodoro_status()["status"] == "work"
+
+    # Status tool
+    status_msg = task_manager.tool_get_pomodoro_status()
+    assert "WORK" in status_msg
+    assert "25:00 remaining" in status_msg
+
+    # Stop tool
+    stop_msg = task_manager.tool_stop_pomodoro()
+    assert "stopped" in stop_msg
+    assert tm.get_pomodoro_status()["status"] == "idle"

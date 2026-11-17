@@ -1090,3 +1090,123 @@ def test_companion_reminder_scheduler_and_chips(tmp_path, monkeypatch):
         controller.popup.deleteLater()
 
 
+def test_pomodoro_tab_and_focus_controls(tmp_path, monkeypatch):
+    import task_manager
+    _get_qapp()
+    test_db = tmp_path / "gui_pomodoro.json"
+    tm = task_manager.TaskManager(str(test_db))
+    monkeypatch.setattr(task_manager, "get_task_manager", lambda: tm)
+
+    cfg = dc.CharacterConfig(character_name="Ben", character_id="ben_tennyson")
+    dlg = dc.TasksDialog(config=cfg)
+    try:
+        # Check Pomodoro tab exists
+        dlg.set_tab("pomodoro")
+        assert dlg._tabs.currentIndex() == 3
+
+        # Default display is 25:00
+        assert dlg._pomo_timer_lbl.text() == "25:00"
+        assert "Ready to Focus" in dlg._pomo_badge.text()
+
+        # Start pomodoro
+        dlg._on_start_pomodoro()
+        st = tm.get_pomodoro_status()
+        assert st["status"] == "work"
+        assert "Focus Session" in dlg._pomo_badge.text()
+
+        # Change duration preset to 15m
+        dlg._on_set_pomodoro_duration(15)
+        assert dlg._pomo_timer_lbl.text() == "15:00"
+        assert tm.get_pomodoro_status()["work_duration_minutes"] == 15
+
+        # Pause and resume
+        dlg._on_toggle_pause_pomodoro()
+        assert tm.get_pomodoro_status()["is_paused"] is True
+        dlg._on_toggle_pause_pomodoro()
+        assert tm.get_pomodoro_status()["is_paused"] is False
+
+        # Reset
+        dlg._on_stop_pomodoro()
+        assert tm.get_pomodoro_status()["status"] == "idle"
+    finally:
+        dlg._pomo_ui_timer.stop()
+        dlg.deleteLater()
+
+
+def test_screen_snipping_overlay_and_chat_attachment():
+    _get_qapp()
+    overlay = dc.ScreenSnippingOverlay()
+    try:
+        assert overlay.isModal() is False
+        # Esc key cancels overlay
+        esc_event = QtGui.QKeyEvent(QtCore.QEvent.Type.KeyPress, QtCore.Qt.Key.Key_Escape, QtCore.Qt.KeyboardModifier.NoModifier)
+        overlay.keyPressEvent(esc_event)
+    finally:
+        overlay.deleteLater()
+
+    # ChatPopupWindow attachment test
+    cfg = dc.CharacterConfig(character_name="Lumi", character_id="lumi")
+    popup = dc.ChatPopupWindow(cfg)
+    try:
+        assert popup._attachment_bar.isHidden() is True
+        dummy_b64 = "QUJDREVG"
+        popup.attach_screenshot(dummy_b64)
+        assert popup._attachment_bar.isHidden() is False
+        assert popup._attached_images == [dummy_b64]
+
+        # Clearing screenshot
+        popup.clear_attached_screenshot()
+        assert popup._attachment_bar.isHidden() is True
+        assert len(popup._attached_images) == 0
+
+        # Send with attachment emits send_message_with_images
+        sent_with_imgs = []
+        popup.send_message_with_images.connect(lambda txt, imgs: sent_with_imgs.append((txt, imgs)))
+        popup.attach_screenshot(dummy_b64)
+        popup._input.setPlainText("Explain this screen error")
+        popup._on_send_clicked()
+
+        assert len(sent_with_imgs) == 1
+        assert sent_with_imgs[0][0] == "Explain this screen error"
+        assert sent_with_imgs[0][1] == [dummy_b64]
+        assert popup._attachment_bar.isHidden() is True
+    finally:
+        popup.deleteLater()
+
+
+def test_alarm_sound_theme_and_voice_briefing_config(tmp_path, monkeypatch):
+    monkeypatch.setattr(dc, "play_alarm_ringtone", lambda *args, **kwargs: None)
+    monkeypatch.setattr(dc, "speak_voice_briefing", lambda *args, **kwargs: None)
+
+    cfg = dc.CharacterConfig(
+        alarm_sound_theme="omnitrix_pulse",
+        custom_alarm_sound_path=str(tmp_path / "custom.wav"),
+        voice_alarm_enabled=True,
+    )
+    # Save & reload roundtrip
+    p = tmp_path / "cfg.json"
+    cfg.save(p)
+    loaded = dc.CharacterConfig.load(p)
+    assert loaded.alarm_sound_theme == "omnitrix_pulse"
+    assert loaded.custom_alarm_sound_path == str(tmp_path / "custom.wav")
+    assert loaded.voice_alarm_enabled is True
+
+    # Alert popup with sound theme
+    _get_qapp()
+    popup = dc.AlertNotificationPopup(
+        title="🚨 Alarm",
+        message="Wake up standup",
+        target_id="alm_1",
+        is_alarm=True,
+        sound_enabled=True,
+        sound_theme=loaded.alarm_sound_theme,
+        custom_sound_path=loaded.custom_alarm_sound_path,
+    )
+    try:
+        assert popup._sound_theme == "omnitrix_pulse"
+        popup.stop_sound()
+        assert popup._stop_sound_event.is_set()
+    finally:
+        popup.deleteLater()
+
+

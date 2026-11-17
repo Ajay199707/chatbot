@@ -79,6 +79,99 @@ def play_alert_sound(kind: str = "reminder", enabled: bool = True) -> None:
     threading.Thread(target=_worker, daemon=True).start()
 
 
+_CURRENT_VOICE_ENGINE: Any = None
+_VOICE_LOCK = threading.Lock()
+
+
+def speak_voice_briefing(text: str) -> None:
+    """Speak text asynchronously using native Windows Speech Synthesis (SAPI)."""
+    if sys.platform != "win32" or not (text or "").strip():
+        return
+
+    def _worker():
+        global _CURRENT_VOICE_ENGINE
+        clean_text = text.strip()
+        try:
+            import win32com.client
+            with _VOICE_LOCK:
+                if _CURRENT_VOICE_ENGINE is None:
+                    _CURRENT_VOICE_ENGINE = win32com.client.Dispatch("SAPI.SpVoice")
+                # 1 = SVSFlagsAsync, 2 = SVSFPurgeBeforeSpeak
+                _CURRENT_VOICE_ENGINE.Speak(clean_text, 1 | 2)
+        except Exception:
+            try:
+                import subprocess
+                ps_text = clean_text.replace('"', '`"').replace("'", " ")
+                subprocess.Popen(
+                    ["powershell", "-NoProfile", "-Command",
+                     f"Add-Type -AssemblyName System.Speech; $s = New-Object System.Speech.Synthesis.SpeechSynthesizer; $s.Speak('{ps_text}')"],
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+            except Exception:
+                pass
+
+    threading.Thread(target=_worker, daemon=True).start()
+
+
+def stop_voice_briefing() -> None:
+    """Stop any currently speaking voice briefing immediately."""
+    global _CURRENT_VOICE_ENGINE
+    if sys.platform != "win32":
+        return
+    try:
+        with _VOICE_LOCK:
+            if _CURRENT_VOICE_ENGINE is not None:
+                _CURRENT_VOICE_ENGINE.Speak("", 2)
+    except Exception:
+        pass
+
+
+def play_alarm_ringtone(
+    theme: str = "digital_beep",
+    custom_wav_path: str = "",
+    stop_event: Optional[threading.Event] = None,
+) -> None:
+    """Play alarm ringtone (built-in procedural sound theme or custom .wav file) in a loop until stopped."""
+    if sys.platform != "win32":
+        return
+
+    import winsound
+
+    # 1. Custom WAV file playback
+    if custom_wav_path and os.path.isfile(custom_wav_path) and custom_wav_path.lower().endswith(".wav"):
+        try:
+            while stop_event is None or not stop_event.is_set():
+                winsound.PlaySound(custom_wav_path, winsound.SND_FILENAME)
+                if stop_event is not None and stop_event.wait(0.5):
+                    break
+            return
+        except Exception:
+            pass
+
+    # 2. Built-in Procedural Sound Themes
+    THEME_FREQS = {
+        "digital_beep": [(880, 140), (1046, 220), (880, 140)],
+        "omnitrix_pulse": [(440, 100), (660, 100), (880, 120), (1320, 240)],
+        "gentle_chime": [(523, 180), (659, 180), (784, 220), (1046, 320)],
+        "retro_8bit": [(262, 70), (330, 70), (392, 70), (523, 70), (659, 70), (784, 150)],
+    }
+    notes = THEME_FREQS.get(theme, THEME_FREQS["digital_beep"])
+
+    try:
+        while stop_event is None or not stop_event.is_set():
+            for freq, dur in notes:
+                if stop_event is not None and stop_event.is_set():
+                    return
+                winsound.Beep(freq, dur)
+                time.sleep(0.03)
+            for _ in range(6):
+                if stop_event is not None and stop_event.is_set():
+                    return
+                time.sleep(0.1)
+    except Exception:
+        pass
+
+
 def _resolve_config_file() -> Path:
     app_dir = chatbot.get_app_dir()
     primary = app_dir / "character_config.json"
@@ -242,6 +335,9 @@ class CharacterConfig:
     custom_topics: List[Dict[str, Any]] = field(default_factory=default_custom_topics)
     window_pos: Optional[List[int]] = None
     alert_sound_enabled: bool = True
+    alarm_sound_theme: str = "digital_beep"  # "digital_beep", "omnitrix_pulse", "gentle_chime", "retro_8bit"
+    custom_alarm_sound_path: str = ""
+    voice_alarm_enabled: bool = True
 
     @classmethod
     def load(cls, path: Path = CONFIG_FILE) -> "CharacterConfig":
@@ -259,6 +355,8 @@ class CharacterConfig:
             if clean_cid not in CHARACTER_PRESETS:
                 clean_cid = "lumi"
             cfg.character_id = clean_cid
+            if getattr(cfg, "alarm_sound_theme", "") not in ("digital_beep", "omnitrix_pulse", "gentle_chime", "retro_8bit"):
+                cfg.alarm_sound_theme = "digital_beep"
             try:
                 cfg.wake_resume_cooldown_minutes = max(1, min(1440, int(cfg.wake_resume_cooldown_minutes)))
             except (TypeError, ValueError):
@@ -828,11 +926,18 @@ class StreamWorker(QtCore.QObject):
     error_received = QtCore.Signal(str)
     finished = QtCore.Signal(str)
 
-    def __init__(self, bot: chatbot.Chatbot, lock: threading.Lock, prompt: str):
+    def __init__(
+        self,
+        bot: chatbot.Chatbot,
+        lock: threading.Lock,
+        prompt: str,
+        images: Optional[List[str]] = None,
+    ):
         super().__init__()
         self._bot = bot
         self._lock = lock
         self._prompt = prompt
+        self._images = list(images or [])
         self.cancel_event = threading.Event()
 
     @QtCore.Slot()
@@ -840,7 +945,9 @@ class StreamWorker(QtCore.QObject):
         final_text = ""
         with self._lock:
             try:
-                for ev in self._bot.stream_turn(self._prompt, cancel_event=self.cancel_event):
+                for ev in self._bot.stream_turn(
+                    self._prompt, cancel_event=self.cancel_event, images=self._images
+                ):
                     etype = ev.get("type")
                     if etype == "token":
                         chunk = ev.get("content", "")
@@ -1053,6 +1160,8 @@ class CharacterWidget(QtWidgets.QWidget):
     avatar_gallery_requested = QtCore.Signal()
     avatar_preset_requested = QtCore.Signal(str)
     tasks_requested = QtCore.Signal()
+    pomodoro_requested = QtCore.Signal()
+    snip_requested = QtCore.Signal()
     clear_chat_requested = QtCore.Signal()
     provider_change_requested = QtCore.Signal(str)
     system_tools_toggled = QtCore.Signal(bool)
@@ -1394,6 +1503,8 @@ class CharacterWidget(QtWidgets.QWidget):
             "QMenu::item:selected{background:#2563eb;}"
         )
         act_chat = menu.addAction(f"Chat with {self._config.character_name}")
+        act_snip = menu.addAction("📸 Snip Screen & Ask AI (Ctrl+Shift+S)")
+        act_pomodoro = menu.addAction("🍅 Pomodoro Focus Timer...")
         act_greet = menu.addAction("Greet Me / Daily Topics")
         act_tasks = menu.addAction("📋 Tasks & Reminders...")
         act_customize = menu.addAction("Customize Character & Persona...")
@@ -1445,6 +1556,10 @@ class CharacterWidget(QtWidgets.QWidget):
         chosen = menu.exec(event.globalPos())
         if chosen == act_chat:
             self.clicked.emit()
+        elif chosen == act_snip:
+            self.snip_requested.emit()
+        elif chosen == act_pomodoro:
+            self.pomodoro_requested.emit()
         elif chosen == act_greet:
             self.greet_requested.emit()
         elif chosen == act_tasks:
@@ -1718,12 +1833,99 @@ class PromptInputBox(QtWidgets.QPlainTextEdit):
         super().keyPressEvent(event)
 
 
+# ============================================================
+# SCREEN SNIPPING OVERLAY
+# ============================================================
+
+class ScreenSnippingOverlay(QtWidgets.QDialog):
+    """Fullscreen screen snipping overlay for interactive region capture."""
+    snipped = QtCore.Signal(str)  # Emits base64-encoded PNG string of snipped region
+
+    def __init__(self, parent: Optional[QtWidgets.QWidget] = None):
+        super().__init__(parent)
+        self.setWindowFlags(
+            QtCore.Qt.WindowType.FramelessWindowHint
+            | QtCore.Qt.WindowType.WindowStaysOnTopHint
+            | QtCore.Qt.WindowType.Tool
+        )
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground, False)
+        self.setCursor(QtCore.Qt.CursorShape.CrossCursor)
+
+        screen = QtGui.QGuiApplication.primaryScreen()
+        if screen:
+            self._full_pixmap = screen.grabWindow(0)
+            self.setGeometry(screen.geometry())
+        else:
+            self._full_pixmap = QtGui.QPixmap()
+
+        self._start_pos: Optional[QtCore.QPoint] = None
+        self._current_pos: Optional[QtCore.QPoint] = None
+        self._rubber_band = QtWidgets.QRubberBand(QtWidgets.QRubberBand.Shape.Rectangle, self)
+
+    def paintEvent(self, event: QtGui.QPaintEvent) -> None:  # noqa: N802
+        painter = QtGui.QPainter(self)
+        if not self._full_pixmap.isNull():
+            painter.drawPixmap(0, 0, self._full_pixmap)
+        # Dim veil
+        painter.fillRect(self.rect(), QtGui.QColor(15, 23, 42, 130))
+
+        # Instructions banner at top center
+        banner_rect = QtCore.QRect((self.width() - 440) // 2, 28, 440, 36)
+        painter.setBrush(QtGui.QColor(15, 23, 42, 230))
+        painter.setPen(QtGui.QPen(QtGui.QColor("#38bdf8"), 1.5))
+        painter.drawRoundedRect(banner_rect, 8, 8)
+        painter.setPen(QtGui.QColor("#f8fafc"))
+        painter.setFont(QtGui.QFont("Segoe UI", 11, QtGui.QFont.Weight.Bold))
+        painter.drawText(
+            banner_rect,
+            QtCore.Qt.AlignmentFlag.AlignCenter,
+            "📸 Click & Drag to snip region · Esc to cancel",
+        )
+
+    def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:  # noqa: N802
+        if event.button() == QtCore.Qt.MouseButton.LeftButton:
+            self._start_pos = event.pos()
+            self._current_pos = event.pos()
+            self._rubber_band.setGeometry(QtCore.QRect(self._start_pos, QtCore.QSize()))
+            self._rubber_band.show()
+
+    def mouseMoveEvent(self, event: QtGui.QMouseEvent) -> None:  # noqa: N802
+        if self._start_pos is not None:
+            self._current_pos = event.pos()
+            rect = QtCore.QRect(self._start_pos, self._current_pos).normalized()
+            self._rubber_band.setGeometry(rect)
+
+    def mouseReleaseEvent(self, event: QtGui.QMouseEvent) -> None:  # noqa: N802
+        if event.button() == QtCore.Qt.MouseButton.LeftButton and self._start_pos is not None:
+            self._rubber_band.hide()
+            rect = QtCore.QRect(self._start_pos, event.pos()).normalized()
+            self.close()
+
+            if rect.width() > 10 and rect.height() > 10 and not self._full_pixmap.isNull():
+                cropped = self._full_pixmap.copy(rect)
+                ba = QtCore.QByteArray()
+                buf = QtCore.QBuffer(ba)
+                buf.open(QtCore.QIODevice.OpenModeFlag.WriteOnly)
+                cropped.save(buf, "PNG")
+                b64 = base64.b64encode(ba.data()).decode("ascii")
+                self.snipped.emit(b64)
+
+    def keyPressEvent(self, event: QtGui.QKeyEvent) -> None:  # noqa: N802
+        if event.key() == QtCore.Qt.Key.Key_Escape:
+            self.close()
+        else:
+            super().keyPressEvent(event)
+
+
 class ChatPopupWindow(QtWidgets.QWidget):
     send_message = QtCore.Signal(str)
+    send_message_with_images = QtCore.Signal(str, list)
     stop_requested = QtCore.Signal()
     clear_requested = QtCore.Signal()
     settings_requested = QtCore.Signal()
     tasks_requested = QtCore.Signal()
+    pomodoro_requested = QtCore.Signal()
+    snip_requested = QtCore.Signal()
     mock_mode_requested = QtCore.Signal()
     provider_switch_requested = QtCore.Signal(str, str)
     enable_web_tools_requested = QtCore.Signal()
@@ -1743,6 +1945,7 @@ class ChatPopupWindow(QtWidgets.QWidget):
         self._pinned = False
         self._drag_offset: Optional[QtCore.QPoint] = None
         self._streaming_bubble: Optional[QtWidgets.QTextBrowser] = None
+        self._attached_images: List[str] = []
         self._streaming_text = ""
         self._wake_card: Optional[QtWidgets.QFrame] = None
         self._wake_briefing_browser: Optional[QtWidgets.QTextBrowser] = None
@@ -2012,6 +2215,30 @@ class ChatPopupWindow(QtWidgets.QWidget):
         self._rebuild_topic_chips(self._config)
         root.addWidget(self._chips_host)
 
+        # Attachment preview bar
+        self._attachment_bar = QtWidgets.QWidget()
+        self._attachment_bar.setVisible(False)
+        self._attachment_bar.setStyleSheet(
+            "QWidget { background: rgba(30, 41, 59, 0.95); border: 1px solid #38bdf8; border-radius: 6px; padding: 2px 6px; }"
+        )
+        att_layout = QtWidgets.QHBoxLayout(self._attachment_bar)
+        att_layout.setContentsMargins(8, 3, 8, 3)
+        att_layout.setSpacing(6)
+        self._att_thumb_lbl = QtWidgets.QLabel("🖼️ Screenshot attached")
+        self._att_thumb_lbl.setStyleSheet("color: #38bdf8; font-size: 11px; font-weight: bold; background: transparent; border: none;")
+        att_layout.addWidget(self._att_thumb_lbl)
+        att_layout.addStretch(1)
+        clear_att_btn = QtWidgets.QPushButton("×")
+        clear_att_btn.setFixedSize(20, 20)
+        clear_att_btn.setToolTip("Remove attached screenshot")
+        clear_att_btn.setStyleSheet(
+            "QPushButton { background: transparent; color: #ef4444; border: none; font-weight: bold; font-size: 14px; } "
+            "QPushButton:hover { color: #f87171; }"
+        )
+        clear_att_btn.clicked.connect(self.clear_attached_screenshot)
+        att_layout.addWidget(clear_att_btn)
+        root.addWidget(self._attachment_bar)
+
         # Input row
         input_row = QtWidgets.QHBoxLayout()
         input_row.setSpacing(8)
@@ -2022,6 +2249,17 @@ class ChatPopupWindow(QtWidgets.QWidget):
         self._input.setPlaceholderText("Ask anything... (Enter to send, Shift+Enter newline)")
         self._input.submit_requested.connect(self._on_send_clicked)
         input_row.addWidget(self._input, 1)
+
+        # Snip camera button
+        snip_cam_btn = QtWidgets.QPushButton("📸")
+        snip_cam_btn.setFixedSize(36, 32)
+        snip_cam_btn.setToolTip("Snip screen region & ask AI (Ctrl+Shift+S)")
+        snip_cam_btn.setStyleSheet(
+            "QPushButton { background: #1e293b; color: #a855f7; border: 1px solid #7e22ce; border-radius: 8px; font-size: 14px; } "
+            "QPushButton:hover { background: #7e22ce; color: #ffffff; }"
+        )
+        snip_cam_btn.clicked.connect(self.snip_requested.emit)
+        input_row.addWidget(snip_cam_btn)
 
         self._send_btn = QtWidgets.QPushButton("Send")
         self._send_btn.setObjectName("sendBtn")
@@ -2101,6 +2339,24 @@ class ChatPopupWindow(QtWidgets.QWidget):
         tasks_btn.clicked.connect(self.tasks_requested.emit)
         self._tasks_chip = tasks_btn
         self._chips_layout.addWidget(tasks_btn)
+
+        pomo_btn = QtWidgets.QPushButton("🍅 Focus")
+        pomo_btn.setStyleSheet(
+            "QPushButton{background:rgba(30,41,59,0.85);color:#f59e0b;border:1px solid rgba(245,158,11,0.4);"
+            "border-radius:12px;padding:3px 10px;font-size:11px;font-weight:700;}"
+            "QPushButton:hover{background:rgba(245,158,11,0.25);color:#ffffff;border-color:#f59e0b;}"
+        )
+        pomo_btn.clicked.connect(self.pomodoro_requested.emit)
+        self._chips_layout.addWidget(pomo_btn)
+
+        snip_btn = QtWidgets.QPushButton("📸 Snip Screen")
+        snip_btn.setStyleSheet(
+            "QPushButton{background:rgba(30,41,59,0.85);color:#c084fc;border:1px solid rgba(192,132,252,0.4);"
+            "border-radius:12px;padding:3px 10px;font-size:11px;font-weight:700;}"
+            "QPushButton:hover{background:rgba(192,132,252,0.25);color:#ffffff;border-color:#c084fc;}"
+        )
+        snip_btn.clicked.connect(self.snip_requested.emit)
+        self._chips_layout.addWidget(snip_btn)
         self._chips_host.updateGeometry()
 
     def apply_config(self, config: CharacterConfig) -> None:
@@ -2444,12 +2700,31 @@ class ChatPopupWindow(QtWidgets.QWidget):
         bar = self._scroll.verticalScrollBar()
         bar.setValue(bar.maximum())
 
+    def attach_screenshot(self, b64_img: str) -> None:
+        """Attach a captured screenshot to the next outgoing message."""
+        self._attached_images = [b64_img]
+        self._attachment_bar.setVisible(True)
+        self._input.setFocus()
+        if not self._input.toPlainText().strip():
+            self._input.setPlaceholderText("Ask a question about this screen capture...")
+
+    def clear_attached_screenshot(self) -> None:
+        """Clear the attached screenshot."""
+        self._attached_images.clear()
+        self._attachment_bar.setVisible(False)
+        self._input.setPlaceholderText("Ask anything... (Enter to send, Shift+Enter newline)")
+
     def _on_send_clicked(self) -> None:
         txt = self._input.toPlainText().strip()
-        if not txt:
+        imgs = list(self._attached_images)
+        if not txt and not imgs:
             return
+        self.clear_attached_screenshot()
         self._input.clear()
-        self._submit_text(txt)
+        if imgs:
+            self.send_message_with_images.emit(txt, imgs)
+        else:
+            self._submit_text(txt)
 
     def _submit_text(self, text: str) -> None:
         self.send_message.emit(text)
@@ -3145,8 +3420,8 @@ class SettingsDialog(QtWidgets.QDialog):
         self.setMinimumSize(640, 540)
         screen = QtGui.QGuiApplication.primaryScreen()
         avail = screen.availableGeometry() if screen else QtCore.QRect(0, 0, 1280, 800)
-        target_w = min(700, max(640, avail.width() - 80))
-        target_h = min(600, max(540, avail.height() - 60))
+        target_w = min(720, max(640, avail.width() - 80))
+        target_h = min(650, max(540, avail.height() - 40))
         self.resize(target_w, target_h)
         self.setStyleSheet(_DARK_DIALOG_QSS)
 
@@ -3557,6 +3832,44 @@ class SettingsDialog(QtWidgets.QDialog):
         self._alert_sound_chk.setChecked(bool(getattr(self._config, "alert_sound_enabled", True)))
         wake_layout.addWidget(self._alert_sound_chk)
 
+        self._voice_alarm_chk = QtWidgets.QCheckBox(
+            "Speak Voice Morning Briefing when Alarm rings"
+        )
+        self._voice_alarm_chk.setChecked(bool(getattr(self._config, "voice_alarm_enabled", True)))
+        wake_layout.addWidget(self._voice_alarm_chk)
+
+        # Sound theme selection
+        theme_row = QtWidgets.QHBoxLayout()
+        theme_row.setSpacing(8)
+        theme_row.addWidget(QtWidgets.QLabel("Alarm Ringtone:"))
+        self._sound_theme_combo = QtWidgets.QComboBox()
+        self._sound_theme_combo.addItem("Digital Beep", "digital_beep")
+        self._sound_theme_combo.addItem("Omnitrix Pulse", "omnitrix_pulse")
+        self._sound_theme_combo.addItem("Gentle Chimes", "gentle_chime")
+        self._sound_theme_combo.addItem("Retro 8-Bit", "retro_8bit")
+        curr_theme = getattr(self._config, "alarm_sound_theme", "digital_beep")
+        t_idx = self._sound_theme_combo.findData(curr_theme)
+        if t_idx >= 0:
+            self._sound_theme_combo.setCurrentIndex(t_idx)
+        theme_row.addWidget(self._sound_theme_combo, 1)
+
+        test_sound_btn = QtWidgets.QPushButton("▶ Test Ringtone")
+        test_sound_btn.setToolTip("Play a sample of the selected sound theme")
+        test_sound_btn.clicked.connect(self._test_alarm_sound)
+        theme_row.addWidget(test_sound_btn)
+        wake_layout.addLayout(theme_row)
+
+        wav_row = QtWidgets.QHBoxLayout()
+        wav_row.setSpacing(8)
+        wav_row.addWidget(QtWidgets.QLabel("Custom WAV:"))
+        self._custom_wav_edit = QtWidgets.QLineEdit(getattr(self._config, "custom_alarm_sound_path", ""))
+        self._custom_wav_edit.setPlaceholderText("Optional path to custom .wav file")
+        wav_row.addWidget(self._custom_wav_edit, 1)
+        browse_wav_btn = QtWidgets.QPushButton("📁 Browse")
+        browse_wav_btn.clicked.connect(self._browse_custom_wav)
+        wav_row.addWidget(browse_wav_btn)
+        wake_layout.addLayout(wav_row)
+
         row1 = QtWidgets.QHBoxLayout()
         row1.setSpacing(8)
         row1.addWidget(QtWidgets.QLabel("Your Name:"))
@@ -3593,7 +3906,7 @@ class SettingsDialog(QtWidgets.QDialog):
         topics_layout.setSpacing(6)
 
         self._topics_list = QtWidgets.QListWidget()
-        self._topics_list.setMinimumHeight(115)
+        self._topics_list.setMinimumHeight(75)
         self._topics_list.itemDoubleClicked.connect(lambda _item: self._edit_topic())
         topics_layout.addWidget(self._topics_list, 1)
 
@@ -3928,7 +4241,26 @@ class SettingsDialog(QtWidgets.QDialog):
         self._config.wake_resume_cooldown_minutes = int(self._wake_cooldown_spin.value())
         self._config.custom_topics = _resolved_topics(copy.deepcopy(self._topics_draft))
         self._config.alert_sound_enabled = self._alert_sound_chk.isChecked()
+        self._config.alarm_sound_theme = self._sound_theme_combo.currentData() or "digital_beep"
+        self._config.custom_alarm_sound_path = self._custom_wav_edit.text().strip()
+        self._config.voice_alarm_enabled = self._voice_alarm_chk.isChecked()
         return self._config
+
+    def _browse_custom_wav(self) -> None:
+        p, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Choose Custom Alarm Sound", "", "WAV Audio Files (*.wav)"
+        )
+        if p:
+            self._custom_wav_edit.setText(p)
+
+    def _test_alarm_sound(self) -> None:
+        theme = self._sound_theme_combo.currentData() or "digital_beep"
+        custom_p = self._custom_wav_edit.text().strip()
+        stop_ev = threading.Event()
+        threading.Timer(2.0, stop_ev.set).start()
+        threading.Thread(
+            target=lambda: play_alarm_ringtone(theme, custom_p, stop_ev), daemon=True
+        ).start()
 
     def apply_system_changes(self, env_path: Optional[Path] = None, startup_dir: Optional[Path] = None) -> bool:
         """Persist any newly entered API keys to .env and update Windows Startup if toggled."""
@@ -3968,6 +4300,8 @@ class AlertNotificationPopup(QtWidgets.QWidget):
         is_alarm: bool = False,
         accent_color: str = "#38bdf8",
         sound_enabled: bool = True,
+        sound_theme: str = "digital_beep",
+        custom_sound_path: str = "",
         on_done: Optional[Any] = None,
         on_snooze: Optional[Any] = None,
         parent: Optional[QtWidgets.QWidget] = None,
@@ -3984,6 +4318,8 @@ class AlertNotificationPopup(QtWidgets.QWidget):
         self._target_id = target_id
         self._is_alarm = is_alarm
         self._sound_enabled = sound_enabled
+        self._sound_theme = sound_theme
+        self._custom_sound_path = custom_sound_path
         self._stop_sound_event = threading.Event()
         self._sound_thread: Optional[threading.Thread] = None
 
@@ -4079,20 +4415,11 @@ class AlertNotificationPopup(QtWidgets.QWidget):
 
     def _start_continuous_alarm(self) -> None:
         def _loop():
-            try:
-                import winsound
-                while not self._stop_sound_event.is_set():
-                    for freq, dur in ((784, 160), (880, 160), (1046, 260)):
-                        if self._stop_sound_event.is_set():
-                            return
-                        winsound.Beep(freq, dur)
-                        time.sleep(0.04)
-                    for _ in range(7):
-                        if self._stop_sound_event.is_set():
-                            return
-                        time.sleep(0.1)
-            except Exception:
-                pass
+            play_alarm_ringtone(
+                theme=self._sound_theme,
+                custom_wav_path=self._custom_sound_path,
+                stop_event=self._stop_sound_event,
+            )
 
         self._sound_thread = threading.Thread(target=_loop, daemon=True)
         self._sound_thread.start()
@@ -4100,6 +4427,7 @@ class AlertNotificationPopup(QtWidgets.QWidget):
     def stop_sound(self) -> None:
         if hasattr(self, "_stop_sound_event"):
             self._stop_sound_event.set()
+        stop_voice_briefing()
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
         self.stop_sound()
@@ -4149,10 +4477,12 @@ class TasksDialog(QtWidgets.QDialog):
             "QPushButton { background: #1e293b; color: #f8fafc; border: 1px solid #334155; border-radius: 6px; padding: 6px 14px; font-size: 12px; font-weight: 500; }"
             "QPushButton:hover { background: #334155; border-color: #38bdf8; }"
             "QPushButton:checked { background: #0284c7; color: #ffffff; font-weight: bold; border-color: #38bdf8; }"
+            "QTabWidget, QTabWidget > QWidget, QTabBar { background: #0b1120; }"
             "QTabWidget::pane { border: 1px solid #1e293b; background: #0f172a; border-radius: 8px; }"
             "QTabBar::tab { background: #1e293b; color: #94a3b8; padding: 8px 20px; border-top-left-radius: 6px; border-top-right-radius: 6px; font-weight: bold; margin-right: 4px; font-size: 13px; }"
             "QTabBar::tab:selected { background: #0f172a; color: #38bdf8; border-bottom: 2px solid #38bdf8; }"
-            "QScrollArea, QScrollArea > QWidget, QScrollArea > QWidget > QWidget { background: transparent; border: none; }"
+            "QScrollArea, QScrollArea > QWidget { background: #0f172a; border: none; }"
+            "QScrollArea > QWidget > QWidget { background: #0f172a; border: none; }"
             "QScrollBar:vertical { background: #0f172a; width: 8px; border-radius: 4px; margin: 0; }"
             "QScrollBar::handle:vertical { background: #334155; min-height: 20px; border-radius: 4px; }"
             "QScrollBar::handle:vertical:hover { background: #38bdf8; }"
@@ -4191,6 +4521,12 @@ class TasksDialog(QtWidgets.QDialog):
         self._build_todo_tab()
         self._build_alarms_tab()
         self._build_reminders_tab()
+        self._build_pomodoro_tab()
+
+        self._pomo_ui_timer = QtCore.QTimer(self)
+        self._pomo_ui_timer.setInterval(1000)
+        self._pomo_ui_timer.timeout.connect(self.refresh_pomodoro)
+        self._pomo_ui_timer.start()
 
         # Footer
         footer = QtWidgets.QHBoxLayout()
@@ -4213,6 +4549,7 @@ class TasksDialog(QtWidgets.QDialog):
 
     def _build_todo_tab(self) -> None:
         tab = QtWidgets.QWidget()
+        tab.setStyleSheet("background: #0f172a;")
         layout = QtWidgets.QVBoxLayout(tab)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(10)
@@ -4262,9 +4599,10 @@ class TasksDialog(QtWidgets.QDialog):
         # Scroll area for items
         self._todo_scroll = QtWidgets.QScrollArea()
         self._todo_scroll.setWidgetResizable(True)
-        self._todo_scroll.viewport().setStyleSheet("background: transparent;")
+        self._todo_scroll.setStyleSheet("background: #0f172a; border: none;")
+        self._todo_scroll.viewport().setStyleSheet("background: #0f172a;")
         self._todo_container = QtWidgets.QWidget()
-        self._todo_container.setStyleSheet("background: transparent;")
+        self._todo_container.setStyleSheet("background: #0f172a;")
         self._todo_layout = QtWidgets.QVBoxLayout(self._todo_container)
         self._todo_layout.setContentsMargins(4, 4, 12, 4)
         self._todo_layout.setSpacing(8)
@@ -4314,6 +4652,7 @@ class TasksDialog(QtWidgets.QDialog):
 
     def _build_alarms_tab(self) -> None:
         tab = QtWidgets.QWidget()
+        tab.setStyleSheet("background: #0f172a;")
         layout = QtWidgets.QVBoxLayout(tab)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(10)
@@ -4330,7 +4669,7 @@ class TasksDialog(QtWidgets.QDialog):
         alm_card = QtWidgets.QFrame()
         alm_card.setObjectName("almAddCard")
         alm_card.setStyleSheet(
-            "QFrame#almAddCard { background: #0f172a; border: 1.5px solid #1e293b; border-radius: 10px; padding: 6px; }"
+            "QFrame#almAddCard { background: #0f172a; border: 1.5px solid #1e293b; border-radius: 10px; }"
         )
         alm_card_layout = QtWidgets.QVBoxLayout(alm_card)
         alm_card_layout.setContentsMargins(10, 10, 10, 10)
@@ -4469,9 +4808,10 @@ class TasksDialog(QtWidgets.QDialog):
         # Alarms scroll area
         self._alarms_scroll = QtWidgets.QScrollArea()
         self._alarms_scroll.setWidgetResizable(True)
-        self._alarms_scroll.viewport().setStyleSheet("background: transparent;")
+        self._alarms_scroll.setStyleSheet("background: #0f172a; border: none;")
+        self._alarms_scroll.viewport().setStyleSheet("background: #0f172a;")
         self._alarms_container = QtWidgets.QWidget()
-        self._alarms_container.setStyleSheet("background: transparent;")
+        self._alarms_container.setStyleSheet("background: #0f172a;")
         self._alarms_layout = QtWidgets.QVBoxLayout(self._alarms_container)
         self._alarms_layout.setContentsMargins(4, 4, 12, 4)
         self._alarms_layout.setSpacing(6)
@@ -4483,6 +4823,7 @@ class TasksDialog(QtWidgets.QDialog):
 
     def _build_reminders_tab(self) -> None:
         tab = QtWidgets.QWidget()
+        tab.setStyleSheet("background: #0f172a;")
         layout = QtWidgets.QVBoxLayout(tab)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(10)
@@ -4528,9 +4869,10 @@ class TasksDialog(QtWidgets.QDialog):
         # Reminders scroll area
         self._rems_scroll = QtWidgets.QScrollArea()
         self._rems_scroll.setWidgetResizable(True)
-        self._rems_scroll.viewport().setStyleSheet("background: transparent;")
+        self._rems_scroll.setStyleSheet("background: #0f172a; border: none;")
+        self._rems_scroll.viewport().setStyleSheet("background: #0f172a;")
         self._rems_container = QtWidgets.QWidget()
-        self._rems_container.setStyleSheet("background: transparent;")
+        self._rems_container.setStyleSheet("background: #0f172a;")
         self._rems_layout = QtWidgets.QVBoxLayout(self._rems_container)
         self._rems_layout.setContentsMargins(4, 4, 12, 4)
         self._rems_layout.setSpacing(6)
@@ -4597,6 +4939,7 @@ class TasksDialog(QtWidgets.QDialog):
         self.refresh_todos()
         self.refresh_alarms()
         self.refresh_reminders()
+        self.refresh_pomodoro()
 
     def refresh_todos(self) -> None:
         while self._todo_layout.count() > 1:
@@ -4662,10 +5005,11 @@ class TasksDialog(QtWidgets.QDialog):
             # High-visibility solid Delete button
             del_btn = QtWidgets.QPushButton("🗑 Delete")
             del_btn.setToolTip("Delete this task")
-            del_btn.setFixedSize(78, 28)
+            del_btn.setFixedHeight(28)
+            del_btn.setMinimumWidth(86)
             del_btn.setStyleSheet(
                 "QPushButton { background: #dc2626; color: #ffffff; border: none; border-radius: 6px; "
-                "font-size: 11px; font-weight: bold; padding: 4px 8px; } "
+                "font-size: 11px; font-weight: bold; padding: 4px 10px; } "
                 "QPushButton:hover { background: #ef4444; } "
                 "QPushButton:pressed { background: #b91c1c; }"
             )
@@ -4736,10 +5080,11 @@ class TasksDialog(QtWidgets.QDialog):
             # High-visibility solid Delete button
             del_btn = QtWidgets.QPushButton("🗑 Delete")
             del_btn.setToolTip("Delete this alarm")
-            del_btn.setFixedSize(78, 28)
+            del_btn.setFixedHeight(28)
+            del_btn.setMinimumWidth(86)
             del_btn.setStyleSheet(
                 "QPushButton { background: #dc2626; color: #ffffff; border: none; border-radius: 6px; "
-                "font-size: 11px; font-weight: bold; padding: 4px 8px; } "
+                "font-size: 11px; font-weight: bold; padding: 4px 10px; } "
                 "QPushButton:hover { background: #ef4444; } "
                 "QPushButton:pressed { background: #b91c1c; }"
             )
@@ -4815,10 +5160,11 @@ class TasksDialog(QtWidgets.QDialog):
             # High-visibility solid Delete button
             del_btn = QtWidgets.QPushButton("🗑 Delete")
             del_btn.setToolTip("Delete this reminder")
-            del_btn.setFixedSize(78, 28)
+            del_btn.setFixedHeight(28)
+            del_btn.setMinimumWidth(86)
             del_btn.setStyleSheet(
                 "QPushButton { background: #dc2626; color: #ffffff; border: none; border-radius: 6px; "
-                "font-size: 11px; font-weight: bold; padding: 4px 8px; } "
+                "font-size: 11px; font-weight: bold; padding: 4px 10px; } "
                 "QPushButton:hover { background: #ef4444; } "
                 "QPushButton:pressed { background: #b91c1c; }"
             )
@@ -4952,6 +5298,199 @@ class TasksDialog(QtWidgets.QDialog):
         if self._on_data_changed:
             self._on_data_changed()
 
+    def set_tab(self, tab_name: str) -> None:
+        """Switch to a specific tab by name."""
+        mapping = {"todo": 0, "alarms": 1, "reminders": 2, "pomodoro": 3}
+        idx = mapping.get(tab_name.lower())
+        if idx is not None and idx < self._tabs.count():
+            self._tabs.setCurrentIndex(idx)
+
+    # ------------------------------------------------------------------------
+    # Tab 4: Pomodoro Focus Timer
+    # ------------------------------------------------------------------------
+
+    def _build_pomodoro_tab(self) -> None:
+        tab = QtWidgets.QWidget()
+        tab.setStyleSheet("background: #0f172a;")
+        layout = QtWidgets.QVBoxLayout(tab)
+        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setSpacing(14)
+
+        # Header
+        hdr = QtWidgets.QHBoxLayout()
+        title = QtWidgets.QLabel("🍅 Pomodoro Focus Timer")
+        title.setStyleSheet("font-size: 15px; font-weight: bold; color: #f59e0b;")
+        hdr.addWidget(title)
+        hdr.addStretch(1)
+        layout.addLayout(hdr)
+
+        # Focus Card
+        card = QtWidgets.QFrame()
+        card.setStyleSheet(
+            "QFrame { background: #111827; border: 1.5px solid #1e293b; border-radius: 12px; padding: 14px; }"
+        )
+        card_layout = QtWidgets.QVBoxLayout(card)
+        card_layout.setContentsMargins(16, 14, 16, 14)
+        card_layout.setSpacing(14)
+        card_layout.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+
+        # Status badge
+        self._pomo_badge = QtWidgets.QLabel("🎯 Ready to Focus")
+        self._pomo_badge.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self._pomo_badge.setStyleSheet(
+            "background: rgba(56, 189, 248, 0.15); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.4); "
+            "border-radius: 12px; font-size: 12px; font-weight: bold; padding: 4px 14px;"
+        )
+        card_layout.addWidget(self._pomo_badge, 0, QtCore.Qt.AlignmentFlag.AlignCenter)
+
+        # Digital Countdown Label
+        self._pomo_timer_lbl = QtWidgets.QLabel("25:00")
+        self._pomo_timer_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self._pomo_timer_lbl.setStyleSheet(
+            "font-family: 'Consolas', 'Courier New', monospace; font-size: 52px; font-weight: bold; "
+            "color: #38bdf8; background: transparent; border: none; padding: 4px 0;"
+        )
+        card_layout.addWidget(self._pomo_timer_lbl, 0, QtCore.Qt.AlignmentFlag.AlignCenter)
+
+        # Stats label
+        self._pomo_stats_lbl = QtWidgets.QLabel("Cycle 1 · 0 sessions completed today")
+        self._pomo_stats_lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self._pomo_stats_lbl.setStyleSheet("color: #94a3b8; font-size: 12px; background: transparent; border: none;")
+        card_layout.addWidget(self._pomo_stats_lbl, 0, QtCore.Qt.AlignmentFlag.AlignCenter)
+
+        # Presets row
+        preset_row = QtWidgets.QHBoxLayout()
+        preset_row.setSpacing(8)
+        preset_row.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        preset_lbl = QtWidgets.QLabel("Duration:")
+        preset_lbl.setStyleSheet("color: #cbd5e1; font-size: 12px; font-weight: bold;")
+        preset_row.addWidget(preset_lbl)
+
+        for duration in (15, 25, 45, 50):
+            btn = QtWidgets.QPushButton(f"{duration}m")
+            btn.setFixedSize(50, 28)
+            btn.setStyleSheet(
+                "QPushButton { background: #1e293b; color: #38bdf8; border: 1px solid #334155; border-radius: 6px; font-weight: bold; font-size: 11px; } "
+                "QPushButton:hover { background: #0284c7; color: #ffffff; }"
+            )
+            btn.clicked.connect(lambda _, d=duration: self._on_set_pomodoro_duration(d))
+            preset_row.addWidget(btn)
+        card_layout.addLayout(preset_row)
+
+        # Action Buttons row
+        action_row = QtWidgets.QHBoxLayout()
+        action_row.setSpacing(10)
+        action_row.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+
+        self._pomo_start_btn = QtWidgets.QPushButton("▶ Start Focus")
+        self._pomo_start_btn.setFixedSize(115, 34)
+        self._pomo_start_btn.setStyleSheet(
+            "QPushButton { background: #16a34a; color: #ffffff; border: none; border-radius: 6px; font-size: 12px; font-weight: bold; } "
+            "QPushButton:hover { background: #22c55e; }"
+        )
+        self._pomo_start_btn.clicked.connect(self._on_start_pomodoro)
+        action_row.addWidget(self._pomo_start_btn)
+
+        self._pomo_pause_btn = QtWidgets.QPushButton("⏸ Pause")
+        self._pomo_pause_btn.setFixedSize(90, 34)
+        self._pomo_pause_btn.setStyleSheet(
+            "QPushButton { background: #d97706; color: #ffffff; border: none; border-radius: 6px; font-size: 12px; font-weight: bold; } "
+            "QPushButton:hover { background: #f59e0b; }"
+        )
+        self._pomo_pause_btn.clicked.connect(self._on_toggle_pause_pomodoro)
+        action_row.addWidget(self._pomo_pause_btn)
+
+        self._pomo_stop_btn = QtWidgets.QPushButton("⏹ Reset")
+        self._pomo_stop_btn.setFixedSize(90, 34)
+        self._pomo_stop_btn.setStyleSheet(
+            "QPushButton { background: #475569; color: #ffffff; border: none; border-radius: 6px; font-size: 12px; font-weight: bold; } "
+            "QPushButton:hover { background: #64748b; }"
+        )
+        self._pomo_stop_btn.clicked.connect(self._on_stop_pomodoro)
+        action_row.addWidget(self._pomo_stop_btn)
+
+        card_layout.addLayout(action_row)
+        layout.addWidget(card)
+        layout.addStretch(1)
+
+        self._tabs.addTab(tab, "🍅 Pomodoro")
+
+    def refresh_pomodoro(self) -> None:
+        """Update Pomodoro countdown label and status badge."""
+        if not hasattr(self, "_pomo_timer_lbl"):
+            return
+        tm = task_manager.get_task_manager()
+        st = tm.get_pomodoro_status()
+        self._pomo_timer_lbl.setText(st["remaining_formatted"])
+        self._pomo_stats_lbl.setText(
+            f"Cycle {st['current_cycle']} · {st['total_completed_cycles']} completed today"
+        )
+        if st["status"] == "idle":
+            self._pomo_badge.setText("🎯 Ready to Focus")
+            self._pomo_badge.setStyleSheet(
+                "background: rgba(56, 189, 248, 0.15); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.4); "
+                "border-radius: 12px; font-size: 12px; font-weight: bold; padding: 4px 14px;"
+            )
+            self._pomo_start_btn.setText("▶ Start Focus")
+            self._pomo_pause_btn.setEnabled(False)
+        elif st["status"] == "work":
+            paused_str = " (Paused)" if st["is_paused"] else ""
+            self._pomo_badge.setText(f"🔥 Focus Session{paused_str}")
+            self._pomo_badge.setStyleSheet(
+                "background: rgba(239, 68, 68, 0.15); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.4); "
+                "border-radius: 12px; font-size: 12px; font-weight: bold; padding: 4px 14px;"
+            )
+            self._pomo_start_btn.setText("Restart")
+            self._pomo_pause_btn.setEnabled(True)
+            self._pomo_pause_btn.setText("▶ Resume" if st["is_paused"] else "⏸ Pause")
+        elif st["status"] == "break":
+            paused_str = " (Paused)" if st["is_paused"] else ""
+            self._pomo_badge.setText(f"☕ Short Break{paused_str}")
+            self._pomo_badge.setStyleSheet(
+                "background: rgba(34, 197, 94, 0.15); color: #4ade80; border: 1px solid rgba(34, 197, 94, 0.4); "
+                "border-radius: 12px; font-size: 12px; font-weight: bold; padding: 4px 14px;"
+            )
+            self._pomo_start_btn.setText("Skip Break")
+            self._pomo_pause_btn.setEnabled(True)
+            self._pomo_pause_btn.setText("▶ Resume" if st["is_paused"] else "⏸ Pause")
+
+    def _on_start_pomodoro(self) -> None:
+        tm = task_manager.get_task_manager()
+        tm.start_pomodoro()
+        self.refresh_pomodoro()
+        self._footer_lbl.setText("Pomodoro focus session started!")
+        if self._on_data_changed:
+            self._on_data_changed()
+
+    def _on_set_pomodoro_duration(self, duration: int) -> None:
+        tm = task_manager.get_task_manager()
+        tm.start_pomodoro(work_minutes=duration)
+        self.refresh_pomodoro()
+        self._footer_lbl.setText(f"Focus timer set to {duration} minutes.")
+        if self._on_data_changed:
+            self._on_data_changed()
+
+    def _on_toggle_pause_pomodoro(self) -> None:
+        tm = task_manager.get_task_manager()
+        st = tm.get_pomodoro_status()
+        if st["is_paused"]:
+            tm.resume_pomodoro()
+            self._footer_lbl.setText("Pomodoro resumed.")
+        else:
+            tm.pause_pomodoro()
+            self._footer_lbl.setText("Pomodoro paused.")
+        self.refresh_pomodoro()
+        if self._on_data_changed:
+            self._on_data_changed()
+
+    def _on_stop_pomodoro(self) -> None:
+        tm = task_manager.get_task_manager()
+        tm.stop_pomodoro()
+        self.refresh_pomodoro()
+        self._footer_lbl.setText("Pomodoro timer reset.")
+        if self._on_data_changed:
+            self._on_data_changed()
+
 
 # ============================================================
 # CONTROLLER / APPLICATION ORCHESTRATOR
@@ -5022,6 +5561,8 @@ class DesktopCompanionApp(QtCore.QObject):
         self.character.all_drives_toggled.connect(self.toggle_all_drives)
         self.character.provider_change_requested.connect(self.switch_provider)
         self.character.tasks_requested.connect(self.open_tasks_dialog)
+        self.character.pomodoro_requested.connect(self.open_pomodoro_tab)
+        self.character.snip_requested.connect(self.start_screen_snipping)
         self.character.reset_pos_requested.connect(self.reset_position)
         self.character.hide_requested.connect(self.hide_character)
         self.character.quit_requested.connect(self.quit_app)
@@ -5029,6 +5570,9 @@ class DesktopCompanionApp(QtCore.QObject):
 
         # Wire popup signals
         self.popup.send_message.connect(self.send_user_message)
+        self.popup.send_message_with_images.connect(lambda txt, imgs: self.send_user_message(txt, images=imgs))
+        self.popup.snip_requested.connect(self.start_screen_snipping)
+        self.popup.pomodoro_requested.connect(self.open_pomodoro_tab)
         self.popup.stop_requested.connect(self.stop_streaming)
         self.popup.clear_requested.connect(self.clear_conversation)
         self.popup.settings_requested.connect(self.open_settings)
@@ -5043,12 +5587,17 @@ class DesktopCompanionApp(QtCore.QObject):
         # Alert popup & tasks dialog
         self._alert_popup: Optional[AlertNotificationPopup] = None
         self._tasks_dialog: Optional[TasksDialog] = None
+        self._snipper: Optional[ScreenSnippingOverlay] = None
 
-        # 2-second background timer checking for due alarms and reminders
+        # 1-second background timer checking for Pomodoro ticks, due alarms and reminders
         self._reminder_timer = QtCore.QTimer(self.character)
-        self._reminder_timer.setInterval(2000)
+        self._reminder_timer.setInterval(1000)
         self._reminder_timer.timeout.connect(self._check_reminders_and_alarms)
         self._reminder_timer.start()
+
+        # Keyboard shortcut Ctrl+Shift+S for Screen Snipping
+        self._snip_shortcut = QtGui.QShortcut(QtGui.QKeySequence("Ctrl+Shift+S"), self.character)
+        self._snip_shortcut.activated.connect(self.start_screen_snipping)
 
         # Single-instance listener
         self._instance_guard: Optional[SingleInstanceGuard] = None
@@ -5605,6 +6154,26 @@ class DesktopCompanionApp(QtCore.QObject):
         self._tasks_dialog.raise_()
         self._tasks_dialog.activateWindow()
 
+    def open_pomodoro_tab(self) -> None:
+        """Open tasks dialog directly to the Pomodoro Focus tab."""
+        self.open_tasks_dialog()
+        if self._tasks_dialog:
+            self._tasks_dialog.set_tab("pomodoro")
+
+    def start_screen_snipping(self) -> None:
+        """Trigger fullscreen interactive region capture for AI Vision."""
+        self._snipper = ScreenSnippingOverlay()
+        self._snipper.snipped.connect(self._on_screen_snipped)
+        self._snipper.show()
+
+    def _on_screen_snipped(self, b64_img: str) -> None:
+        """Handle captured screen snip and attach to chat popup."""
+        self.popup.attach_screenshot(b64_img)
+        self.popup.show()
+        self.popup.raise_()
+        self.popup.activateWindow()
+        self.character.show_speech_bubble("📸 Snipped! Ask me anything about this image.", duration_ms=4000)
+
     def _on_tasks_data_changed(self) -> None:
         if hasattr(self, "popup") and self.popup:
             self.popup.apply_config(self._config)
@@ -5612,6 +6181,15 @@ class DesktopCompanionApp(QtCore.QObject):
     def _check_reminders_and_alarms(self) -> None:
         try:
             tm = task_manager.get_task_manager()
+
+            # 1. Tick Pomodoro focus session clock
+            pomo_ev = tm.tick_pomodoro(1)
+            if pomo_ev.get("event") == "work_completed":
+                self._on_pomodoro_work_completed()
+            elif pomo_ev.get("event") == "break_completed":
+                self._on_pomodoro_break_completed()
+
+            # 2. Check due reminders and alarms
             due_rems, due_alms = tm.check_due_items()
             for rem in due_rems:
                 self._trigger_reminder_alert(rem)
@@ -5619,6 +6197,30 @@ class DesktopCompanionApp(QtCore.QObject):
                 self._trigger_alarm_alert(alm)
         except Exception:
             pass
+
+    def _on_pomodoro_work_completed(self) -> None:
+        self.character.show()
+        self.character.set_state("happy")
+        self.character.show_speech_bubble(
+            "🎉 Focus session completed!\nTime for a 5-minute break. Awesome work!", duration_ms=8000
+        )
+        play_alert_sound("alarm", enabled=getattr(self._config, "alert_sound_enabled", True))
+        if getattr(self._config, "voice_alarm_enabled", True) and getattr(self._config, "alert_sound_enabled", True):
+            speak_voice_briefing("Focus session completed! Great job. Time for a well-deserved break.")
+        if self._tasks_dialog and self._tasks_dialog.isVisible():
+            self._tasks_dialog.refresh_pomodoro()
+
+    def _on_pomodoro_break_completed(self) -> None:
+        self.character.show()
+        self.character.set_state("happy")
+        self.character.show_speech_bubble(
+            "☕ Break finished!\nReady for your next focus session when you are.", duration_ms=7000
+        )
+        play_alert_sound("reminder", enabled=getattr(self._config, "alert_sound_enabled", True))
+        if getattr(self._config, "voice_alarm_enabled", True) and getattr(self._config, "alert_sound_enabled", True):
+            speak_voice_briefing("Break is over! Ready for your next focus session.")
+        if self._tasks_dialog and self._tasks_dialog.isVisible():
+            self._tasks_dialog.refresh_pomodoro()
 
     def _trigger_reminder_alert(self, rem: Any) -> None:
         self.character.show()
@@ -5644,17 +6246,33 @@ class DesktopCompanionApp(QtCore.QObject):
     def _trigger_alarm_alert(self, alm: Any) -> None:
         self.character.show()
         self.character.set_state("happy")
-        self.character.show_speech_bubble(f"🚨 ALARM: {alm.label} ({alm.time_str})", duration_ms=10000)
+
+        # Construct Voice Morning Briefing
+        tm = task_manager.get_task_manager()
+        summary = tm.get_daily_summary()
+        pending_cnt = summary["pending_todo_count"]
+        now_dt = datetime.now()
+        greeting = "Good morning!" if now_dt.hour < 12 else ("Good afternoon!" if now_dt.hour < 17 else "Good evening!")
+        time_str = now_dt.strftime("%I:%M %p").lstrip("0")
+        task_info = f"You have {pending_cnt} pending task{'s' if pending_cnt != 1 else ''} scheduled for today." if pending_cnt > 0 else "Your to-do list is all clear today."
+        briefing_text = f"{greeting} It's {time_str}. {task_info}"
+
+        if getattr(self._config, "voice_alarm_enabled", True) and getattr(self._config, "alert_sound_enabled", True):
+            speak_voice_briefing(f"{alm.label}! {briefing_text}")
+
+        self.character.show_speech_bubble(f"🚨 {alm.label} ({alm.time_str})!\n{briefing_text}", duration_ms=10000)
 
         if self._alert_popup:
             self._alert_popup.close()
         self._alert_popup = AlertNotificationPopup(
             title="🚨 Alarm Ringing!",
-            message=f"{alm.label} ({alm.time_str})",
+            message=f"{alm.label} ({alm.time_str})\n{briefing_text}",
             target_id=alm.id,
             is_alarm=True,
             accent_color="#ef4444",
             sound_enabled=getattr(self._config, "alert_sound_enabled", True),
+            sound_theme=getattr(self._config, "alarm_sound_theme", "digital_beep"),
+            custom_sound_path=getattr(self._config, "custom_alarm_sound_path", ""),
             on_done=lambda: setattr(alm, "status", "dismissed"),
             on_snooze=lambda mins: self._snooze_alarm(alm, mins),
         )
@@ -5688,18 +6306,24 @@ class DesktopCompanionApp(QtCore.QObject):
         self.popup.clear_messages()
         self.popup.add_system_note("Conversation cleared.")
 
-    def send_user_message(self, prompt: str) -> None:
+    def send_user_message(self, prompt: str, images: Optional[List[str]] = None) -> None:
         if self._worker_thread is not None and self._worker_thread.isRunning():
             return
 
-        self.popup.add_user_message(prompt)
+        display_text = prompt
+        if images and not prompt:
+            display_text = "📸 [Captured Screen Snip]"
+        elif images:
+            display_text = f"📸 [Captured Screen Snip]\n{prompt}"
+
+        self.popup.add_user_message(display_text)
         self.popup.start_assistant_message()
         self.popup.set_streaming(True)
         self.popup.set_status("Thinking...")
         self.character.set_state("thinking")
 
         thread = QtCore.QThread(self)
-        worker = StreamWorker(self._bot, self._bot_lock, prompt)
+        worker = StreamWorker(self._bot, self._bot_lock, prompt, images=images)
         worker.moveToThread(thread)
 
         thread.started.connect(worker.run)

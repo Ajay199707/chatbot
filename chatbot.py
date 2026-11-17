@@ -596,6 +596,7 @@ class Message:
     tool_calls: List[Dict[str, Any]] = field(default_factory=list)
     raw_model_parts: Optional[List[Dict[str, Any]]] = None
     gemini_tool_exchange: Optional[List[Dict[str, Any]]] = None
+    images: List[str] = field(default_factory=list)  # Base64-encoded PNG strings for vision
 
 
 @dataclass
@@ -1238,12 +1239,16 @@ class Chatbot:
         user_input: str,
         use_tools: Optional[bool] = None,
         cancel_event: Optional[threading.Event] = None,
+        images: Optional[List[str]] = None,
     ) -> Generator[Dict[str, Any], None, None]:
         """Stream structured events for one user turn across the active provider."""
         text = (user_input or "").strip()
-        if not text:
+        img_list = list(images or [])
+        if not text and not img_list:
             yield {"type": "error", "message": "Empty message."}
             return
+        if not text and img_list:
+            text = "Please examine and explain what is in this captured screen image."
 
         web_tools_enabled = self.config.use_tools if use_tools is None else bool(use_tools)
         sys_tools_enabled = (
@@ -1251,7 +1256,7 @@ class Chatbot:
             if use_tools is None
             else (bool(use_tools) and bool(self.config.enable_system_tools))
         )
-        self.add_message(Message(role="user", content=text))
+        self.add_message(Message(role="user", content=text, images=img_list))
 
         try:
             protocol = PROVIDER_SPECS.get(self.config.provider, {}).get("protocol", "mock")
@@ -1282,7 +1287,16 @@ class Chatbot:
         contents: List[Dict[str, Any]] = []
         for msg in self.history:
             if msg.role == "user":
-                contents.append({"role": "user", "parts": [{"text": msg.content}]})
+                parts: List[Dict[str, Any]] = []
+                for img_b64 in getattr(msg, "images", []):
+                    parts.append({
+                        "inlineData": {
+                            "mimeType": "image/png",
+                            "data": img_b64,
+                        }
+                    })
+                parts.append({"text": msg.content or " "})
+                contents.append({"role": "user", "parts": parts})
                 continue
             if msg.gemini_tool_exchange:
                 contents.extend(msg.gemini_tool_exchange)
@@ -1502,7 +1516,17 @@ class Chatbot:
         sys_prompt = _resolve_system_prompt_with_context(self.config.system_prompt)
         messages.append({"role": "system", "content": sys_prompt})
         for msg in self.history:
-            messages.append({"role": msg.role, "content": msg.content})
+            if msg.role == "user" and getattr(msg, "images", None):
+                parts: List[Dict[str, Any]] = []
+                for img_b64 in msg.images:
+                    parts.append({
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/png;base64,{img_b64}"},
+                    })
+                parts.append({"type": "text", "text": msg.content or " "})
+                messages.append({"role": "user", "content": parts})
+            else:
+                messages.append({"role": msg.role, "content": msg.content})
         return messages
 
     def _stream_openai_turn(
@@ -1811,6 +1835,30 @@ class Chatbot:
         lower = user_input.lower()
         recorded_tools: List[Dict[str, Any]] = []
 
+        # Check for multimodal / vision images attached to this turn
+        last_images = self.history[-1].images if self.history and getattr(self.history[-1], "images", None) else []
+        if last_images:
+            yield {"type": "thought", "content": "Analyzing attached screen capture image with Vision..."}
+            vision_summary = (
+                f"📸 **[Screen Snipping & Vision Analysis]**\n\n"
+                f"I received and processed your screen capture! Here is the summary:\n"
+                f"- **Your Question**: *\"{user_input}\"*\n"
+                f"- **Image Data**: Captured screen region ({len(last_images[0])} bytes base64 PNG).\n"
+                f"- **Analysis**: The image has been successfully inspected. (When connected to Gemini 2.5/3.8 or OpenAI Vision, OCR text extraction, visual UI debugging, code diagnostics, and layout breakdown will run automatically).\n\n"
+                f"How would you like me to assist you with this screen content?"
+            )
+            for word in vision_summary.split(" "):
+                yield {"type": "token", "content": word + " "}
+                time.sleep(0.015)
+            self.add_message(Message(role="assistant", content=vision_summary))
+            yield {
+                "type": "done",
+                "content": vision_summary,
+                "thoughts": "Analyzing attached screen capture image with Vision...",
+                "tool_calls": [],
+            }
+            return
+
         thought = "Analyzing user prompt in offline mock mode..."
         yield {"type": "thought", "content": thought}
 
@@ -1956,6 +2004,16 @@ class Chatbot:
             elif any(lower.startswith(p) for p in ("delete task", "remove task", "clear completed")):
                 task_q = re.sub(r"^(?:delete|remove)\s+(?:task\s+)?", "", user_input, flags=re.IGNORECASE).strip(" ?.:,")
                 tool_plan = ("delete_todo", {"query": task_q or "completed"})
+
+            # Pomodoro Focus Timer
+            elif re.search(r"\b(?:start|begin|set)\s+(?:a\s+)?(?:(\d+)\s*(?:m|min|minute)s?\s+)?pomodoro\b", lower) or any(kw in lower for kw in ("start focus", "begin focus", "focus for", "pomodoro timer", "pomodoro session")):
+                pomo_m = re.search(r"(\d+)\s*(?:m|min|minute)", user_input, re.IGNORECASE)
+                work_m = int(pomo_m.group(1)) if pomo_m else 25
+                tool_plan = ("start_pomodoro", {"work_minutes": work_m, "break_minutes": 5})
+            elif re.search(r"\b(?:stop|cancel|end|reset)\s+(?:the\s+)?pomodoro\b", lower):
+                tool_plan = ("stop_pomodoro", {})
+            elif "pomodoro" in lower and any(w in lower for w in ("status", "check", "time", "left", "remaining", "how much")):
+                tool_plan = ("get_pomodoro_status", {})
 
             elif any(kw in lower for kw in ("weather", "forecast", "temperature")):
                 wm = re.search(
