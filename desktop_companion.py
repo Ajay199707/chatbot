@@ -1917,6 +1917,20 @@ class ScreenSnippingOverlay(QtWidgets.QDialog):
             super().keyPressEvent(event)
 
 
+class MessageWheelFilter(QtCore.QObject):
+    """Forward mouse wheel events from chat bubble viewports to the main message scroll area."""
+
+    def __init__(self, target_scroll: Optional[QtWidgets.QScrollArea] = None, parent: Optional[QtCore.QObject] = None):
+        super().__init__(parent)
+        self._scroll = target_scroll
+
+    def eventFilter(self, watched: QtCore.QObject, event: QtCore.QEvent) -> bool:
+        if event.type() == QtCore.QEvent.Type.Wheel and self._scroll is not None:
+            QtWidgets.QApplication.sendEvent(self._scroll.viewport(), event)
+            return True
+        return super().eventFilter(watched, event)
+
+
 class ChatPopupWindow(QtWidgets.QWidget):
     send_message = QtCore.Signal(str)
     send_message_with_images = QtCore.Signal(str, list)
@@ -1939,7 +1953,9 @@ class ChatPopupWindow(QtWidgets.QWidget):
             | QtCore.Qt.WindowType.Tool,
         )
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self.setFixedSize(410, 520)
+        self.resize(410, 580)
+        self.setMinimumSize(380, 480)
+        self.setMaximumSize(750, 950)
 
         self._config = config
         self._pinned = False
@@ -1950,6 +1966,8 @@ class ChatPopupWindow(QtWidgets.QWidget):
         self._wake_card: Optional[QtWidgets.QFrame] = None
         self._wake_briefing_browser: Optional[QtWidgets.QTextBrowser] = None
         self._files_chip: Optional[QtWidgets.QPushButton] = None
+        self._user_scrolled_up = False
+        self._bubble_wheel_filter = MessageWheelFilter(None, self)
 
         self._build_ui()
         self.apply_config(config)
@@ -2188,15 +2206,22 @@ class ChatPopupWindow(QtWidgets.QWidget):
         self._scroll.setWidgetResizable(True)
         self._scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._bubble_wheel_filter._scroll = self._scroll
 
         self._msg_container = QtWidgets.QWidget()
         self._msg_container.setStyleSheet("background: transparent;")
+        self._msg_container.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.MinimumExpanding)
         self._msg_layout = QtWidgets.QVBoxLayout(self._msg_container)
+        self._msg_layout.setSizeConstraint(QtWidgets.QLayout.SizeConstraint.SetMinimumSize)
         self._msg_layout.setContentsMargins(2, 4, 2, 4)
         self._msg_layout.setSpacing(8)
         self._msg_layout.addStretch(1)
         self._scroll.setWidget(self._msg_container)
         root.addWidget(self._scroll, 1)
+
+        v_bar = self._scroll.verticalScrollBar()
+        v_bar.rangeChanged.connect(self._on_scroll_range_changed)
+        v_bar.valueChanged.connect(self._on_scroll_value_changed)
 
         self._scroll_timer = QtCore.QTimer(self)
         self._scroll_timer.setSingleShot(True)
@@ -2524,6 +2549,8 @@ class ChatPopupWindow(QtWidgets.QWidget):
             "border-radius:8px;padding:6px 8px;font-size:12px;}"
         )
         briefing_browser.setVisible(False)
+        if hasattr(self, "_bubble_wheel_filter") and self._bubble_wheel_filter:
+            briefing_browser.viewport().installEventFilter(self._bubble_wheel_filter)
         col.addWidget(briefing_browser)
 
         self._wake_card = card
@@ -2570,13 +2597,15 @@ class ChatPopupWindow(QtWidgets.QWidget):
         self._insert_widget(lbl)
 
     def add_user_message(self, text: str) -> None:
+        self._user_scrolled_up = False
         wrap = QtWidgets.QWidget()
+        wrap.setSizePolicy(QtWidgets.QSizePolicy.Policy.Preferred, QtWidgets.QSizePolicy.Policy.Minimum)
         row = QtWidgets.QHBoxLayout(wrap)
         row.setContentsMargins(36, 0, 0, 0)
         row.addStretch(1)
         lbl = QtWidgets.QLabel(text)
         lbl.setWordWrap(True)
-        lbl.setMaximumWidth(332)
+        lbl.setMaximumWidth(max(260, int(self.width() * 0.78)))
         lbl.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
         lbl.setStyleSheet(
             "background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #2563eb, stop:1 #1d4ed8);"
@@ -2584,6 +2613,9 @@ class ChatPopupWindow(QtWidgets.QWidget):
             "border-bottom-right-radius: 3px; font-size: 13px;"
             "border: 1px solid rgba(255, 255, 255, 0.12);"
         )
+        if hasattr(self, "_bubble_wheel_filter") and self._bubble_wheel_filter:
+            wrap.installEventFilter(self._bubble_wheel_filter)
+            lbl.installEventFilter(self._bubble_wheel_filter)
         row.addWidget(lbl)
         self._insert_widget(wrap)
 
@@ -2602,6 +2634,8 @@ class ChatPopupWindow(QtWidgets.QWidget):
             "QTextBrowser{background:rgba(30, 41, 59, 0.88);color:#f1f5f9;border:1px solid rgba(51, 65, 85, 0.7);"
             "border-radius:14px;border-bottom-left-radius:3px;padding:9px 12px;font-size:13px;}"
         )
+        if hasattr(self, "_bubble_wheel_filter") and self._bubble_wheel_filter:
+            browser.viewport().installEventFilter(self._bubble_wheel_filter)
         preset = get_character_preset(self._config.character_id)
         accent = preset.accent_color
         browser.setHtml(
@@ -2610,7 +2644,8 @@ class ChatPopupWindow(QtWidgets.QWidget):
             f"<span style='color:{accent};font-size:14px;'>●</span> "
             f"<i style='color:#94a3b8;margin-left:6px;font-size:12px;'>Thinking...</i>"
         )
-        browser.document().setTextWidth(330)
+        vw = self._scroll.viewport().width() if hasattr(self, "_scroll") else 350
+        browser.document().setTextWidth(max(240, vw - 24) if vw > 50 else 350)
         self._streaming_bubble = browser
         self._insert_widget(browser)
         self._sync_browser_height(browser)
@@ -2683,14 +2718,45 @@ class ChatPopupWindow(QtWidgets.QWidget):
         self._scroll_to_bottom()
 
     def _insert_widget(self, w: QtWidgets.QWidget) -> None:
+        self._user_scrolled_up = False
         idx = max(0, self._msg_layout.count() - 1)
         self._msg_layout.insertWidget(idx, w)
         self._scroll_to_bottom()
 
     def _sync_browser_height(self, browser: QtWidgets.QTextBrowser) -> None:
-        browser.document().setTextWidth(max(220, self._scroll.viewport().width() - 24))
+        vw = self._scroll.viewport().width() if hasattr(self, "_scroll") else 350
+        target_w = max(240, vw - 24) if vw > 50 else 350
+        browser.document().setTextWidth(target_w)
         doc_h = int(browser.document().size().height()) + 20
         browser.setFixedHeight(max(38, doc_h))
+
+    def _sync_all_browser_heights(self) -> None:
+        if not hasattr(self, "_scroll") or not hasattr(self, "_msg_layout"):
+            return
+        vw = self._scroll.viewport().width()
+        target_w = max(240, vw - 24) if vw > 50 else 350
+        for i in range(self._msg_layout.count()):
+            item = self._msg_layout.itemAt(i)
+            w = item.widget() if item else None
+            if isinstance(w, QtWidgets.QTextBrowser):
+                w.document().setTextWidth(target_w)
+                doc_h = int(w.document().size().height()) + 20
+                w.setFixedHeight(max(38, doc_h))
+
+    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._sync_all_browser_heights()
+        if hasattr(self, "_size_grip") and self._size_grip:
+            gw, gh = 14, 14
+            self._size_grip.move(self.width() - gw - 3, self.height() - gh - 3)
+
+    def _on_scroll_range_changed(self, min_val: int, max_val: int) -> None:
+        if not getattr(self, "_user_scrolled_up", False):
+            self._scroll.verticalScrollBar().setValue(max_val)
+
+    def _on_scroll_value_changed(self, val: int) -> None:
+        bar = self._scroll.verticalScrollBar()
+        self._user_scrolled_up = (bar.maximum() - val) > 40
 
     def _scroll_to_bottom(self) -> None:
         self._scroll_timer.start()
@@ -2715,6 +2781,7 @@ class ChatPopupWindow(QtWidgets.QWidget):
         self._input.setPlaceholderText("Ask anything... (Enter to send, Shift+Enter newline)")
 
     def _on_send_clicked(self) -> None:
+        self._user_scrolled_up = False
         txt = self._input.toPlainText().strip()
         imgs = list(self._attached_images)
         if not txt and not imgs:
@@ -2727,6 +2794,7 @@ class ChatPopupWindow(QtWidgets.QWidget):
             self._submit_text(txt)
 
     def _submit_text(self, text: str) -> None:
+        self._user_scrolled_up = False
         self.send_message.emit(text)
 
     def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:  # noqa: N802
@@ -5704,6 +5772,10 @@ class DesktopCompanionApp(QtCore.QObject):
         avail = screen.availableGeometry() if screen else QtCore.QRect(0, 0, 1280, 720)
 
         pw, ph = self.popup.width(), self.popup.height()
+        if ph > avail.height() - 24:
+            self.popup.resize(pw, max(380, avail.height() - 32))
+            ph = self.popup.height()
+
         # Prefer left side if character is on right half of screen
         if char_geo.center().x() > avail.center().x():
             px = char_geo.left() - pw - 6
