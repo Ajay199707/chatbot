@@ -3967,6 +3967,7 @@ class AlertNotificationPopup(QtWidgets.QWidget):
         target_id: str,
         is_alarm: bool = False,
         accent_color: str = "#38bdf8",
+        sound_enabled: bool = True,
         on_done: Optional[Any] = None,
         on_snooze: Optional[Any] = None,
         parent: Optional[QtWidgets.QWidget] = None,
@@ -3982,6 +3983,14 @@ class AlertNotificationPopup(QtWidgets.QWidget):
         self._on_snooze = on_snooze
         self._target_id = target_id
         self._is_alarm = is_alarm
+        self._sound_enabled = sound_enabled
+        self._stop_sound_event = threading.Event()
+        self._sound_thread: Optional[threading.Thread] = None
+
+        if is_alarm and sound_enabled and sys.platform == "win32":
+            self._start_continuous_alarm()
+        elif not is_alarm and sound_enabled and sys.platform == "win32":
+            play_alert_sound("reminder", enabled=True)
 
         vbox = QtWidgets.QVBoxLayout(self)
         vbox.setContentsMargins(8, 8, 8, 8)
@@ -4031,34 +4040,35 @@ class AlertNotificationPopup(QtWidgets.QWidget):
         btn_row = QtWidgets.QHBoxLayout()
         btn_row.setSpacing(8)
 
-        done_btn = QtWidgets.QPushButton("✓ Done" if not is_alarm else "✓ Stop")
+        done_btn = QtWidgets.QPushButton("✓ Stop Alarm" if is_alarm else "✓ Done")
+        hover_col = "#b91c1c" if is_alarm else "#2563eb"
         done_btn.setStyleSheet(
             f"QPushButton {{"
             f"  background: {border_col}; color: #ffffff; border: none; "
             f"  border-radius: 8px; padding: 6px 14px; font-weight: bold; font-size: 12px;"
             f"}}"
-            f"QPushButton:hover {{ background: #2563eb; }}"
+            f"QPushButton:hover {{ background: {hover_col}; }}"
         )
         done_btn.clicked.connect(self._handle_done)
         btn_row.addWidget(done_btn)
 
-        if not is_alarm:
-            snooze_btn = QtWidgets.QPushButton("⏳ Snooze 5m")
-            snooze_btn.setStyleSheet(
-                "QPushButton {"
-                "  background: #1e293b; color: #38bdf8; border: 1px solid #334155; "
-                "  border-radius: 8px; padding: 6px 12px; font-size: 12px;"
-                "}"
-                "QPushButton:hover { background: #334155; border-color: #38bdf8; }"
-            )
-            snooze_btn.clicked.connect(lambda: self._handle_snooze(5))
-            btn_row.addWidget(snooze_btn)
+        snooze_btn = QtWidgets.QPushButton("⏳ Snooze 5m")
+        snooze_btn.setStyleSheet(
+            "QPushButton {"
+            "  background: #1e293b; color: #38bdf8; border: 1px solid #334155; "
+            "  border-radius: 8px; padding: 6px 12px; font-size: 12px; font-weight: bold;"
+            "}"
+            "QPushButton:hover { background: #334155; border-color: #38bdf8; }"
+        )
+        snooze_btn.clicked.connect(lambda: self._handle_snooze(5))
+        btn_row.addWidget(snooze_btn)
 
         btn_row.addStretch(1)
         card_layout.addLayout(btn_row)
 
         vbox.addWidget(card)
-        self.resize(320, 140)
+        self.resize(340, 150)
+        self.setMinimumWidth(320)
 
         # Auto-close after 60 seconds
         self._auto_timer = QtCore.QTimer(self)
@@ -4067,12 +4077,42 @@ class AlertNotificationPopup(QtWidgets.QWidget):
         self._auto_timer.timeout.connect(self.close)
         self._auto_timer.start()
 
+    def _start_continuous_alarm(self) -> None:
+        def _loop():
+            try:
+                import winsound
+                while not self._stop_sound_event.is_set():
+                    for freq, dur in ((784, 160), (880, 160), (1046, 260)):
+                        if self._stop_sound_event.is_set():
+                            return
+                        winsound.Beep(freq, dur)
+                        time.sleep(0.04)
+                    for _ in range(7):
+                        if self._stop_sound_event.is_set():
+                            return
+                        time.sleep(0.1)
+            except Exception:
+                pass
+
+        self._sound_thread = threading.Thread(target=_loop, daemon=True)
+        self._sound_thread.start()
+
+    def stop_sound(self) -> None:
+        if hasattr(self, "_stop_sound_event"):
+            self._stop_sound_event.set()
+
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:
+        self.stop_sound()
+        super().closeEvent(event)
+
     def _handle_done(self) -> None:
+        self.stop_sound()
         if self._on_done:
             self._on_done()
         self.close()
 
     def _handle_snooze(self, mins: int) -> None:
+        self.stop_sound()
         if self._on_snooze:
             self._on_snooze(mins)
         self.close()
@@ -4093,20 +4133,29 @@ class TasksDialog(QtWidgets.QDialog):
     ):
         super().__init__(parent)
         self.setWindowTitle("Tasks, Alarms & Reminders")
-        self.resize(580, 560)
-        self.setMinimumSize(520, 480)
+        self.resize(650, 640)
+        self.setMinimumSize(560, 520)
         self.setStyleSheet(
             "QDialog { background: #0b1120; color: #f8fafc; }"
             "QLabel { color: #f8fafc; }"
             "QLineEdit { background: #1e293b; color: #f8fafc; border: 1px solid #334155; border-radius: 6px; padding: 6px 10px; font-size: 12px; }"
             "QLineEdit:focus { border-color: #38bdf8; }"
             "QComboBox { background: #1e293b; color: #f8fafc; border: 1px solid #334155; border-radius: 6px; padding: 5px 10px; font-size: 12px; }"
+            "QComboBox:hover { border-color: #38bdf8; }"
+            "QComboBox QAbstractItemView { background-color: #1e293b; color: #f8fafc; selection-background-color: #0284c7; selection-color: #ffffff; border: 1px solid #475569; border-radius: 6px; padding: 4px; outline: none; }"
+            "QComboBox QAbstractItemView::item { color: #f8fafc; padding: 6px 12px; min-height: 24px; border-radius: 4px; }"
+            "QComboBox QAbstractItemView::item:hover { background-color: #334155; color: #38bdf8; }"
+            "QComboBox QAbstractItemView::item:selected { background-color: #0284c7; color: #ffffff; }"
             "QPushButton { background: #1e293b; color: #f8fafc; border: 1px solid #334155; border-radius: 6px; padding: 6px 12px; font-size: 12px; }"
             "QPushButton:hover { background: #334155; border-color: #38bdf8; }"
             "QTabWidget::pane { border: 1px solid #1e293b; background: #0f172a; border-radius: 8px; }"
             "QTabBar::tab { background: #1e293b; color: #94a3b8; padding: 8px 18px; border-top-left-radius: 6px; border-top-right-radius: 6px; font-weight: bold; margin-right: 4px; }"
             "QTabBar::tab:selected { background: #0f172a; color: #38bdf8; border-bottom: 2px solid #38bdf8; }"
             "QScrollArea { background: transparent; border: none; }"
+            "QScrollBar:vertical { background: #0f172a; width: 8px; border-radius: 4px; margin: 0; }"
+            "QScrollBar::handle:vertical { background: #334155; min-height: 20px; border-radius: 4px; }"
+            "QScrollBar::handle:vertical:hover { background: #38bdf8; }"
+            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }"
             "QCheckBox { color: #f8fafc; spacing: 8px; font-size: 13px; }"
             "QCheckBox::indicator { width: 18px; height: 18px; border-radius: 4px; border: 1.5px solid #475569; background: #1e293b; }"
             "QCheckBox::indicator:checked { background: #22c55e; border-color: #22c55e; image: none; }"
@@ -4115,6 +4164,7 @@ class TasksDialog(QtWidgets.QDialog):
         self._config = config
         self._on_data_changed = on_data_changed
         self._todo_filter = "pending"
+        self._syncing_time = False
 
         vbox = QtWidgets.QVBoxLayout(self)
         vbox.setContentsMargins(18, 16, 18, 16)
@@ -4192,12 +4242,17 @@ class TasksDialog(QtWidgets.QDialog):
         f_row.addWidget(self._clear_done_btn)
         layout.addLayout(f_row)
 
+        # Priority explanation guide
+        pri_guide = QtWidgets.QLabel("Priority Guide: 🔴 High (Urgent / Must do today) • 🟡 Medium (Standard) • 🟢 Low (Flexible / Casual)")
+        pri_guide.setStyleSheet("font-size: 11px; color: #94a3b8; padding: 2px 4px;")
+        layout.addWidget(pri_guide)
+
         # Scroll area for items
         self._todo_scroll = QtWidgets.QScrollArea()
         self._todo_scroll.setWidgetResizable(True)
         self._todo_container = QtWidgets.QWidget()
         self._todo_layout = QtWidgets.QVBoxLayout(self._todo_container)
-        self._todo_layout.setContentsMargins(4, 4, 4, 4)
+        self._todo_layout.setContentsMargins(4, 4, 12, 4)
         self._todo_layout.setSpacing(8)
         self._todo_layout.addStretch(1)
         self._todo_scroll.setWidget(self._todo_container)
@@ -4216,10 +4271,14 @@ class TasksDialog(QtWidgets.QDialog):
         add_layout.addWidget(self._new_todo_input, 1)
 
         self._new_todo_pri = QtWidgets.QComboBox()
-        self._new_todo_pri.addItems(["Medium", "High", "Low"])
+        self._new_todo_pri.setView(QtWidgets.QListView())
+        self._new_todo_pri.addItem("🟡 Medium (Standard)", "medium")
+        self._new_todo_pri.addItem("🔴 High (Urgent)", "high")
+        self._new_todo_pri.addItem("🟢 Low (Flexible)", "low")
         add_layout.addWidget(self._new_todo_pri)
 
         self._new_todo_cat = QtWidgets.QComboBox()
+        self._new_todo_cat.setView(QtWidgets.QListView())
         self._new_todo_cat.addItems(["General", "Work", "Personal", "Study", "Shopping"])
         add_layout.addWidget(self._new_todo_cat)
 
@@ -4238,9 +4297,9 @@ class TasksDialog(QtWidgets.QDialog):
         tab = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(tab)
         layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(12)
+        layout.setSpacing(10)
 
-        # Section 1: Alarms
+        # Section 1: Alarms Header
         alm_hdr = QtWidgets.QHBoxLayout()
         alm_title = QtWidgets.QLabel("⏰ Active Alarms")
         alm_title.setStyleSheet("font-size: 14px; font-weight: bold; color: #38bdf8;")
@@ -4248,43 +4307,150 @@ class TasksDialog(QtWidgets.QDialog):
         alm_hdr.addStretch(1)
         layout.addLayout(alm_hdr)
 
-        # Add Alarm input row
-        alm_add_box = QtWidgets.QFrame()
-        alm_add_box.setStyleSheet("background:#111827;border:1px solid #1e293b;border-radius:8px;padding:4px;")
-        alm_add_layout = QtWidgets.QHBoxLayout(alm_add_box)
-        alm_add_layout.setContentsMargins(6, 6, 6, 6)
-        alm_add_layout.setSpacing(8)
+        # Add Alarm Card with Type + Slide Clock Time Picker
+        alm_card = QtWidgets.QFrame()
+        alm_card.setObjectName("almAddCard")
+        alm_card.setStyleSheet(
+            "QFrame#almAddCard { background: #0f172a; border: 1.5px solid #1e293b; border-radius: 10px; padding: 6px; }"
+        )
+        alm_card_layout = QtWidgets.QVBoxLayout(alm_card)
+        alm_card_layout.setContentsMargins(10, 8, 10, 8)
+        alm_card_layout.setSpacing(8)
 
-        self._alm_time_input = QtWidgets.QLineEdit()
-        self._alm_time_input.setPlaceholderText("Time (e.g. 07:30 or 7:00 AM)")
-        self._alm_time_input.setFixedWidth(140)
-        alm_add_layout.addWidget(self._alm_time_input)
+        # Row 1: Direct Type Time Input (QLineEdit) + Label + Recurrence + "+ Set Alarm" button
+        row1 = QtWidgets.QHBoxLayout()
+        row1.setSpacing(8)
+
+        self._alm_time_input = QtWidgets.QLineEdit("07:30")
+        self._alm_time_input.setPlaceholderText("07:30")
+        self._alm_time_input.setToolTip("Type exact time (e.g. 07:30 or 7:00 AM) or slide the controls below")
+        self._alm_time_input.setFixedWidth(110)
+        self._alm_time_input.setStyleSheet(
+            "QLineEdit { background: #1e293b; color: #38bdf8; font-size: 15px; font-weight: bold; "
+            "border: 1.5px solid #0284c7; border-radius: 6px; padding: 4px 8px; }"
+            "QLineEdit:focus { border-color: #38bdf8; }"
+        )
+        self._alm_time_input.textChanged.connect(self._on_alm_time_typed)
+        row1.addWidget(self._alm_time_input)
 
         self._alm_label_input = QtWidgets.QLineEdit()
-        self._alm_label_input.setPlaceholderText("Label (e.g. Morning Standup)")
+        self._alm_label_input.setPlaceholderText("Alarm label (e.g. Morning Wakeup, Standup)...")
         self._alm_label_input.returnPressed.connect(self._on_add_alarm)
-        alm_add_layout.addWidget(self._alm_label_input, 1)
+        row1.addWidget(self._alm_label_input, 1)
+
+        self._alm_repeat_combo = QtWidgets.QComboBox()
+        self._alm_repeat_combo.setView(QtWidgets.QListView())
+        self._alm_repeat_combo.addItem("Everyday", "all")
+        self._alm_repeat_combo.addItem("Weekdays (Mon-Fri)", "weekdays")
+        self._alm_repeat_combo.addItem("Weekends (Sat-Sun)", "weekends")
+        self._alm_repeat_combo.addItem("Once", "once")
+        self._alm_repeat_combo.setFixedWidth(145)
+        row1.addWidget(self._alm_repeat_combo)
 
         alm_btn = QtWidgets.QPushButton("+ Set Alarm")
         alm_btn.setStyleSheet(
-            "QPushButton{background:#0284c7;color:#fff;font-weight:bold;border:none;border-radius:6px;padding:6px 12px;}"
+            "QPushButton{background:#0284c7;color:#fff;font-weight:bold;border:none;border-radius:6px;padding:7px 14px;font-size:12px;}"
             "QPushButton:hover{background:#0369a1;}"
         )
         alm_btn.clicked.connect(self._on_add_alarm)
-        alm_add_layout.addWidget(alm_btn)
-        layout.addWidget(alm_add_box)
+        row1.addWidget(alm_btn)
+        alm_card_layout.addLayout(row1)
+
+        # Row 2: Sliders section (Hour slider and Minute slider with real-time sync)
+        sliders_box = QtWidgets.QFrame()
+        sliders_box.setStyleSheet("background: #111827; border: 1px solid #1e293b; border-radius: 6px; padding: 6px;")
+        sliders_layout = QtWidgets.QVBoxLayout(sliders_box)
+        sliders_layout.setContentsMargins(8, 6, 8, 6)
+        sliders_layout.setSpacing(6)
+
+        slider_style = (
+            "QSlider::groove:horizontal { height: 6px; background: #1e293b; border-radius: 3px; }"
+            "QSlider::sub-page:horizontal { background: #0284c7; border-radius: 3px; }"
+            "QSlider::handle:horizontal { background: #38bdf8; border: 2px solid #ffffff; width: 16px; margin: -5px 0; border-radius: 8px; }"
+            "QSlider::handle:horizontal:hover { background: #ffffff; border-color: #38bdf8; }"
+        )
+
+        # Hour slider row
+        h_row = QtWidgets.QHBoxLayout()
+        self._hour_slider_lbl = QtWidgets.QLabel("Hour: 07 AM")
+        self._hour_slider_lbl.setFixedWidth(90)
+        self._hour_slider_lbl.setStyleSheet("font-size: 11px; font-weight: bold; color: #38bdf8;")
+        h_row.addWidget(self._hour_slider_lbl)
+
+        self._hour_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
+        self._hour_slider.setRange(0, 23)
+        self._hour_slider.setValue(7)
+        self._hour_slider.setStyleSheet(slider_style)
+        self._hour_slider.valueChanged.connect(self._on_slider_time_changed)
+        h_row.addWidget(self._hour_slider, 1)
+        sliders_layout.addLayout(h_row)
+
+        # Minute slider row
+        m_row = QtWidgets.QHBoxLayout()
+        self._min_slider_lbl = QtWidgets.QLabel("Min: 30")
+        self._min_slider_lbl.setFixedWidth(90)
+        self._min_slider_lbl.setStyleSheet("font-size: 11px; font-weight: bold; color: #38bdf8;")
+        m_row.addWidget(self._min_slider_lbl)
+
+        self._min_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
+        self._min_slider.setRange(0, 59)
+        self._min_slider.setValue(30)
+        self._min_slider.setStyleSheet(slider_style)
+        self._min_slider.valueChanged.connect(self._on_slider_time_changed)
+        m_row.addWidget(self._min_slider, 1)
+        sliders_layout.addLayout(m_row)
+
+        alm_card_layout.addWidget(sliders_box)
+
+        # Row 3: Quick Time Presets
+        presets_row = QtWidgets.QHBoxLayout()
+        presets_row.setSpacing(6)
+        p_lbl = QtWidgets.QLabel("Quick Presets:")
+        p_lbl.setStyleSheet("font-size: 11px; color: #64748b; font-weight: bold;")
+        presets_row.addWidget(p_lbl)
+
+        presets = [
+            ("☀️ 7:00 AM", 7, 0),
+            ("💼 9:00 AM", 9, 0),
+            ("🍽️ 1:00 PM", 13, 0),
+            ("☕ 5:00 PM", 17, 0),
+            ("🌙 10:00 PM", 22, 0),
+        ]
+        for label, h, m in presets:
+            btn = QtWidgets.QPushButton(label)
+            btn.setStyleSheet(
+                "QPushButton { background: #1e293b; color: #94a3b8; border: 1px solid #334155; "
+                "border-radius: 4px; padding: 2px 8px; font-size: 11px; }"
+                "QPushButton:hover { background: #334155; color: #38bdf8; border-color: #38bdf8; }"
+            )
+            btn.clicked.connect(lambda _, h_val=h, m_val=m: self._set_alarm_time(h_val, m_val))
+            presets_row.addWidget(btn)
+
+        plus15_btn = QtWidgets.QPushButton("+15m")
+        plus15_btn.setStyleSheet(
+            "QPushButton { background: #1e293b; color: #94a3b8; border: 1px solid #334155; "
+            "border-radius: 4px; padding: 2px 8px; font-size: 11px; }"
+            "QPushButton:hover { background: #334155; color: #38bdf8; border-color: #38bdf8; }"
+        )
+        plus15_btn.clicked.connect(lambda: self._add_minutes_to_alarm(15))
+        presets_row.addWidget(plus15_btn)
+
+        presets_row.addStretch(1)
+        alm_card_layout.addLayout(presets_row)
+
+        layout.addWidget(alm_card)
 
         # Alarms scroll area
         self._alarms_scroll = QtWidgets.QScrollArea()
         self._alarms_scroll.setWidgetResizable(True)
         self._alarms_container = QtWidgets.QWidget()
         self._alarms_layout = QtWidgets.QVBoxLayout(self._alarms_container)
-        self._alarms_layout.setContentsMargins(4, 4, 4, 4)
+        self._alarms_layout.setContentsMargins(4, 4, 12, 4)
         self._alarms_layout.setSpacing(6)
         self._alarms_layout.addStretch(1)
         self._alarms_scroll.setWidget(self._alarms_container)
-        self._alarms_scroll.setFixedHeight(130)
-        layout.addWidget(self._alarms_scroll)
+        self._alarms_scroll.setMinimumHeight(120)
+        layout.addWidget(self._alarms_scroll, 1)
 
         # Section 2: Reminders
         rem_hdr = QtWidgets.QHBoxLayout()
@@ -4325,13 +4491,60 @@ class TasksDialog(QtWidgets.QDialog):
         self._rems_scroll.setWidgetResizable(True)
         self._rems_container = QtWidgets.QWidget()
         self._rems_layout = QtWidgets.QVBoxLayout(self._rems_container)
-        self._rems_layout.setContentsMargins(4, 4, 4, 4)
+        self._rems_layout.setContentsMargins(4, 4, 12, 4)
         self._rems_layout.setSpacing(6)
         self._rems_layout.addStretch(1)
         self._rems_scroll.setWidget(self._rems_container)
+        self._rems_scroll.setMinimumHeight(100)
         layout.addWidget(self._rems_scroll, 1)
 
         self._tabs.addTab(tab, "⏰ Alarms & Reminders")
+
+    def _on_alm_time_typed(self, text: str) -> None:
+        if self._syncing_time:
+            return
+        parsed = task_manager.parse_alarm_time(text)
+        if parsed:
+            try:
+                parts = parsed.split(":")
+                h, m = int(parts[0]), int(parts[1])
+                self._syncing_time = True
+                self._hour_slider.setValue(h)
+                self._min_slider.setValue(m)
+                self._update_slider_labels(h, m)
+                self._syncing_time = False
+            except Exception:
+                pass
+
+    def _on_slider_time_changed(self) -> None:
+        if self._syncing_time:
+            return
+        self._syncing_time = True
+        h = self._hour_slider.value()
+        m = self._min_slider.value()
+        self._alm_time_input.setText(f"{h:02d}:{m:02d}")
+        self._update_slider_labels(h, m)
+        self._syncing_time = False
+
+    def _update_slider_labels(self, h: int, m: int) -> None:
+        am_pm = "AM" if h < 12 else "PM"
+        h_12 = h % 12
+        if h_12 == 0:
+            h_12 = 12
+        self._hour_slider_lbl.setText(f"Hour: {h_12:02d} {am_pm}")
+        self._min_slider_lbl.setText(f"Min: {m:02d}")
+
+    def _set_alarm_time(self, h: int, m: int) -> None:
+        self._syncing_time = True
+        self._hour_slider.setValue(h)
+        self._min_slider.setValue(m)
+        self._alm_time_input.setText(f"{h:02d}:{m:02d}")
+        self._update_slider_labels(h, m)
+        self._syncing_time = False
+
+    def _add_minutes_to_alarm(self, mins: int) -> None:
+        now = datetime.now() + timedelta(minutes=mins)
+        self._set_alarm_time(now.hour, now.minute)
 
     def _set_todo_filter(self, mode: str) -> None:
         self._todo_filter = mode
@@ -4346,7 +4559,6 @@ class TasksDialog(QtWidgets.QDialog):
         self.refresh_reminders()
 
     def refresh_todos(self) -> None:
-        # Clear existing widgets
         while self._todo_layout.count() > 1:
             item = self._todo_layout.takeAt(0)
             if item.widget():
@@ -4363,10 +4575,13 @@ class TasksDialog(QtWidgets.QDialog):
 
         for todo in todos:
             row = QtWidgets.QFrame()
-            row.setStyleSheet("QFrame{background:#111827;border:1px solid #1e293b;border-radius:6px;padding:4px;}"
-                              "QFrame:hover{border-color:#334155;}")
+            row.setObjectName("todoRow")
+            row.setStyleSheet(
+                "QFrame#todoRow { background: #111827; border: 1px solid #1e293b; border-radius: 8px; }"
+                "QFrame#todoRow:hover { border-color: #334155; }"
+            )
             row_layout = QtWidgets.QHBoxLayout(row)
-            row_layout.setContentsMargins(8, 6, 8, 6)
+            row_layout.setContentsMargins(10, 8, 10, 8)
             row_layout.setSpacing(10)
 
             # Checkbox
@@ -4376,11 +4591,17 @@ class TasksDialog(QtWidgets.QDialog):
             row_layout.addWidget(chk)
 
             # Priority badge
-            pri_col = {"high": "#ef4444", "low": "#10b981"}.get(todo.priority, "#f59e0b")
-            pri_badge = QtWidgets.QLabel(f" {todo.priority.upper()} ")
+            pri_info = {
+                "high": ("#ef4444", "🔴 HIGH", "Priority: High - Urgent task requiring prompt attention"),
+                "low": ("#10b981", "🟢 LOW", "Priority: Low - Flexible task with no strict deadline"),
+            }.get(todo.priority, ("#f59e0b", "🟡 MED", "Priority: Medium - Standard priority daily task"))
+            pri_col, pri_text, pri_tip = pri_info
+
+            pri_badge = QtWidgets.QLabel(f" {pri_text} ")
+            pri_badge.setToolTip(pri_tip)
             pri_badge.setStyleSheet(
                 f"background:{pri_col}22;color:{pri_col};border:1px solid {pri_col}66;"
-                f"border-radius:4px;font-size:10px;font-weight:bold;padding:1px 3px;"
+                f"border-radius:4px;font-size:10px;font-weight:bold;padding:2px 5px;"
             )
             row_layout.addWidget(pri_badge)
 
@@ -4392,14 +4613,21 @@ class TasksDialog(QtWidgets.QDialog):
 
             # Category tag
             cat_lbl = QtWidgets.QLabel(f"#{todo.category}")
-            cat_lbl.setStyleSheet("color:#64748b;font-size:11px;")
+            cat_lbl.setStyleSheet(
+                "background: #1e293b; color: #94a3b8; border: 1px solid #334155; "
+                "border-radius: 4px; padding: 2px 6px; font-size: 11px;"
+            )
             row_layout.addWidget(cat_lbl)
 
             # Delete button
-            del_btn = QtWidgets.QPushButton("🗑️")
-            del_btn.setFixedSize(26, 26)
-            del_btn.setStyleSheet("QPushButton{background:transparent;border:none;font-size:13px;}"
-                                  "QPushButton:hover{background:#334155;border-radius:4px;}")
+            del_btn = QtWidgets.QPushButton("✕ Delete")
+            del_btn.setToolTip("Delete this task")
+            del_btn.setFixedSize(65, 26)
+            del_btn.setStyleSheet(
+                "QPushButton { background: rgba(239, 68, 68, 0.15); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.4); "
+                "border-radius: 6px; font-size: 11px; font-weight: bold; } "
+                "QPushButton:hover { background: #ef4444; color: #ffffff; border-color: #ef4444; }"
+            )
             del_btn.clicked.connect(lambda _, t_id=todo.id: self._on_delete_todo(t_id))
             row_layout.addWidget(del_btn)
 
@@ -4422,37 +4650,55 @@ class TasksDialog(QtWidgets.QDialog):
 
         for alm in alarms:
             card = QtWidgets.QFrame()
-            card.setStyleSheet("QFrame{background:#111827;border:1px solid #1e293b;border-radius:6px;padding:4px;}")
+            card.setObjectName("alarmRow")
+            card.setStyleSheet(
+                "QFrame#alarmRow { background: #111827; border: 1px solid #1e293b; border-radius: 8px; }"
+                "QFrame#alarmRow:hover { border-color: #334155; }"
+            )
             card_layout = QtWidgets.QHBoxLayout(card)
-            card_layout.setContentsMargins(8, 4, 8, 4)
+            card_layout.setContentsMargins(10, 8, 10, 8)
             card_layout.setSpacing(10)
 
-            time_lbl = QtWidgets.QLabel(alm.time_str)
+            try:
+                dt = datetime.strptime(alm.time_str, "%H:%M")
+                display_time = dt.strftime("%I:%M %p")
+            except Exception:
+                display_time = alm.time_str
+
+            time_lbl = QtWidgets.QLabel(display_time)
+            time_lbl.setFixedWidth(80)
             time_lbl.setStyleSheet(f"font-size:15px;font-weight:bold;{'color:#38bdf8;' if alm.enabled else 'color:#64748b;'}")
             card_layout.addWidget(time_lbl)
 
             lbl = QtWidgets.QLabel(alm.label)
-            lbl.setStyleSheet(f"font-size:12px;{'color:#f8fafc;' if alm.enabled else 'color:#64748b;'}")
+            lbl.setStyleSheet(f"font-size:13px;{'color:#f8fafc;' if alm.enabled else 'color:#64748b;'}")
             card_layout.addWidget(lbl, 1)
 
-            days_lbl = QtWidgets.QLabel("Everyday" if "all" in alm.days else ", ".join(alm.days))
-            days_lbl.setStyleSheet("color:#64748b;font-size:11px;")
+            days_str = "Everyday" if "all" in alm.days else (", ".join(alm.days) if alm.days else "Once")
+            days_lbl = QtWidgets.QLabel(days_str)
+            days_lbl.setStyleSheet("background: #1e293b; color: #94a3b8; border: 1px solid #334155; border-radius: 4px; padding: 2px 6px; font-size: 11px;")
             card_layout.addWidget(days_lbl)
 
             # Toggle button
             tog_btn = QtWidgets.QPushButton("ON" if alm.enabled else "OFF")
-            tog_btn.setFixedSize(45, 24)
+            tog_btn.setFixedSize(48, 26)
             tog_btn.setStyleSheet(
                 f"QPushButton{{background:{'#22c55e' if alm.enabled else '#334155'};color:#fff;"
-                f"border:none;border-radius:12px;font-size:11px;font-weight:bold;}}"
+                f"border:none;border-radius:13px;font-size:11px;font-weight:bold;}}"
+                f"QPushButton:hover{{background:{'#16a34a' if alm.enabled else '#475569'};}}"
             )
             tog_btn.clicked.connect(lambda _, a_id=alm.id: self._on_toggle_alarm(a_id))
             card_layout.addWidget(tog_btn)
 
-            del_btn = QtWidgets.QPushButton("🗑️")
-            del_btn.setFixedSize(24, 24)
-            del_btn.setStyleSheet("QPushButton{background:transparent;border:none;font-size:12px;}"
-                                  "QPushButton:hover{background:#334155;border-radius:4px;}")
+            # Explicit Delete button
+            del_btn = QtWidgets.QPushButton("✕ Delete")
+            del_btn.setToolTip("Delete this alarm")
+            del_btn.setFixedSize(65, 26)
+            del_btn.setStyleSheet(
+                "QPushButton { background: rgba(239, 68, 68, 0.15); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.4); "
+                "border-radius: 6px; font-size: 11px; font-weight: bold; } "
+                "QPushButton:hover { background: #ef4444; color: #ffffff; border-color: #ef4444; }"
+            )
             del_btn.clicked.connect(lambda _, a_id=alm.id: self._on_delete_alarm(a_id))
             card_layout.addWidget(del_btn)
 
@@ -4475,9 +4721,13 @@ class TasksDialog(QtWidgets.QDialog):
 
         for rem in rems:
             card = QtWidgets.QFrame()
-            card.setStyleSheet("QFrame{background:#111827;border:1px solid #1e293b;border-radius:6px;padding:4px;}")
+            card.setObjectName("reminderRow")
+            card.setStyleSheet(
+                "QFrame#reminderRow { background: #111827; border: 1px solid #1e293b; border-radius: 8px; }"
+                "QFrame#reminderRow:hover { border-color: #334155; }"
+            )
             card_layout = QtWidgets.QHBoxLayout(card)
-            card_layout.setContentsMargins(8, 4, 8, 4)
+            card_layout.setContentsMargins(10, 8, 10, 8)
             card_layout.setSpacing(10)
 
             msg_lbl = QtWidgets.QLabel(rem.message)
@@ -4514,17 +4764,35 @@ class TasksDialog(QtWidgets.QDialog):
             done_btn.clicked.connect(lambda _, r_id=rem.id: self._on_dismiss_reminder(r_id))
             card_layout.addWidget(done_btn)
 
+            del_btn = QtWidgets.QPushButton("✕ Delete")
+            del_btn.setToolTip("Delete this reminder")
+            del_btn.setFixedSize(65, 24)
+            del_btn.setStyleSheet(
+                "QPushButton { background: rgba(239, 68, 68, 0.15); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.4); "
+                "border-radius: 6px; font-size: 11px; font-weight: bold; } "
+                "QPushButton:hover { background: #ef4444; color: #ffffff; border-color: #ef4444; }"
+            )
+            del_btn.clicked.connect(lambda _, r_id=rem.id: self._on_delete_reminder(r_id))
+            card_layout.addWidget(del_btn)
+
             self._rems_layout.insertWidget(self._rems_layout.count() - 1, card)
 
     def _on_add_todo(self) -> None:
         title = self._new_todo_input.text().strip()
         if not title:
             return
-        pri = self._new_todo_pri.currentText().lower()
-        cat = self._new_todo_cat.currentText().lower()
+        pri_raw = str(self._new_todo_pri.currentData() or self._new_todo_pri.currentText()).lower()
+        if "high" in pri_raw:
+            pri = "high"
+        elif "low" in pri_raw:
+            pri = "low"
+        else:
+            pri = "medium"
+        cat = self._new_todo_cat.currentText().strip() or "general"
         task_manager.get_task_manager().add_todo(title, priority=pri, category=cat)
         self._new_todo_input.clear()
         self.refresh_todos()
+        self._footer_lbl.setText(f"Added task '{title}'.")
         if self._on_data_changed:
             self._on_data_changed()
 
@@ -4543,24 +4811,43 @@ class TasksDialog(QtWidgets.QDialog):
     def _on_delete_todo(self, todo_id: str) -> None:
         task_manager.get_task_manager().delete_todo(todo_id)
         self.refresh_todos()
+        self._footer_lbl.setText("Task deleted.")
         if self._on_data_changed:
             self._on_data_changed()
 
     def _clear_completed_todos(self) -> None:
         task_manager.get_task_manager().clear_completed_todos()
         self.refresh_todos()
+        self._footer_lbl.setText("Cleared completed tasks.")
         if self._on_data_changed:
             self._on_data_changed()
 
     def _on_add_alarm(self) -> None:
-        t_str = self._alm_time_input.text().strip()
+        raw_time = self._alm_time_input.text().strip()
+        if not raw_time:
+            return
+        t_str = task_manager.parse_alarm_time(raw_time)
         if not t_str:
+            self._footer_lbl.setText("Invalid alarm time format. Use HH:MM or AM/PM (e.g. 07:30).")
             return
         lbl = self._alm_label_input.text().strip() or "Alarm"
-        task_manager.get_task_manager().add_alarm(t_str, label=lbl)
-        self._alm_time_input.clear()
+
+        repeat_mode = "all"
+        if hasattr(self, "_alm_repeat_combo"):
+            repeat_mode = self._alm_repeat_combo.currentData() or "all"
+        if repeat_mode == "weekdays":
+            days = ["Mon", "Tue", "Wed", "Thu", "Fri"]
+        elif repeat_mode == "weekends":
+            days = ["Sat", "Sun"]
+        elif repeat_mode == "once":
+            days = [task_manager.DAYS_OF_WEEK[datetime.now().weekday()]]
+        else:
+            days = ["all"]
+
+        task_manager.get_task_manager().add_alarm(t_str, label=lbl, days=days)
         self._alm_label_input.clear()
         self.refresh_alarms()
+        self._footer_lbl.setText(f"Alarm set for {t_str} ({lbl}).")
         if self._on_data_changed:
             self._on_data_changed()
 
@@ -4573,6 +4860,7 @@ class TasksDialog(QtWidgets.QDialog):
     def _on_delete_alarm(self, alarm_id: str) -> None:
         task_manager.get_task_manager().delete_alarm(alarm_id)
         self.refresh_alarms()
+        self._footer_lbl.setText("Alarm deleted.")
         if self._on_data_changed:
             self._on_data_changed()
 
@@ -4589,18 +4877,28 @@ class TasksDialog(QtWidgets.QDialog):
         self._rem_msg_input.clear()
         self._rem_time_input.clear()
         self.refresh_reminders()
+        self._footer_lbl.setText(f"Reminder set for {t_expr}.")
         if self._on_data_changed:
             self._on_data_changed()
 
     def _on_snooze_reminder(self, reminder_id: str) -> None:
         task_manager.get_task_manager().snooze_reminder(reminder_id, minutes=5)
         self.refresh_reminders()
+        self._footer_lbl.setText("Reminder snoozed 5m.")
         if self._on_data_changed:
             self._on_data_changed()
 
     def _on_dismiss_reminder(self, reminder_id: str) -> None:
         task_manager.get_task_manager().dismiss_reminder(reminder_id)
         self.refresh_reminders()
+        self._footer_lbl.setText("Reminder completed.")
+        if self._on_data_changed:
+            self._on_data_changed()
+
+    def _on_delete_reminder(self, reminder_id: str) -> None:
+        task_manager.get_task_manager().delete_reminder(reminder_id)
+        self.refresh_reminders()
+        self._footer_lbl.setText("Reminder deleted.")
         if self._on_data_changed:
             self._on_data_changed()
 
@@ -5276,7 +5574,6 @@ class DesktopCompanionApp(QtCore.QObject):
         self.character.show()
         self.character.set_state("happy")
         self.character.show_speech_bubble(f"⏰ Reminder: {rem.message}", duration_ms=9000)
-        play_alert_sound("reminder", enabled=getattr(self._config, "alert_sound_enabled", True))
 
         if self._alert_popup:
             self._alert_popup.close()
@@ -5287,6 +5584,7 @@ class DesktopCompanionApp(QtCore.QObject):
             target_id=rem.id,
             is_alarm=False,
             accent_color=preset.accent_color,
+            sound_enabled=getattr(self._config, "alert_sound_enabled", True),
             on_done=lambda: task_manager.get_task_manager().dismiss_reminder(rem.id),
             on_snooze=lambda mins: self._snooze_reminder(rem.id, mins),
         )
@@ -5297,16 +5595,16 @@ class DesktopCompanionApp(QtCore.QObject):
         self.character.show()
         self.character.set_state("happy")
         self.character.show_speech_bubble(f"🚨 ALARM: {alm.label} ({alm.time_str})", duration_ms=10000)
-        play_alert_sound("alarm", enabled=getattr(self._config, "alert_sound_enabled", True))
 
         if self._alert_popup:
             self._alert_popup.close()
         self._alert_popup = AlertNotificationPopup(
-            title="🚨 Alarm",
-            message=f"{alm.label} - {alm.time_str}",
+            title="🚨 Alarm Ringing!",
+            message=f"{alm.label} ({alm.time_str})",
             target_id=alm.id,
             is_alarm=True,
             accent_color="#ef4444",
+            sound_enabled=getattr(self._config, "alert_sound_enabled", True),
             on_done=lambda: setattr(alm, "status", "dismissed"),
             on_snooze=lambda mins: self._snooze_alarm(alm, mins),
         )

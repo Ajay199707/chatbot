@@ -997,13 +997,35 @@ def test_tasks_dialog_and_alert_popup(tmp_path, monkeypatch):
         dlg._alm_label_input.setText("Workout Alarm")
         dlg._on_add_alarm()
         assert len(tm.get_alarms()) == 1
-        assert tm.get_alarms()[0].time_str == "08:30"
+        alm = tm.get_alarms()[0]
+        assert alm.time_str == "08:30"
+
+        # Test slider & typing synchronization
+        dlg._hour_slider.setValue(14)
+        dlg._min_slider.setValue(45)
+        assert dlg._alm_time_input.text() == "14:45"
+        assert "02 PM" in dlg._hour_slider_lbl.text()
+        assert "45" in dlg._min_slider_lbl.text()
+
+        # Type time back
+        dlg._alm_time_input.setText("07:15")
+        assert dlg._hour_slider.value() == 7
+        assert dlg._min_slider.value() == 15
+
+        # Test alarm deletion
+        dlg._on_delete_alarm(alm.id)
+        assert len(tm.get_alarms()) == 0
 
         # Add reminder
         dlg._rem_msg_input.setText("Stretch break")
         dlg._rem_time_input.setText("in 15m")
         dlg._on_add_reminder()
         assert len(tm.get_reminders("pending")) == 1
+        rem = tm.get_reminders("pending")[0]
+
+        # Test reminder deletion
+        dlg._on_delete_reminder(rem.id)
+        assert len(tm.get_reminders("pending")) == 0
 
         # Test AlertNotificationPopup
         done_called = False

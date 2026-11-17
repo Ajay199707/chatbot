@@ -134,6 +134,12 @@ def test_reminder_crud_and_due_check(tmp_path):
     assert tm.dismiss_reminder(rem.id) is True
     assert len(tm.get_reminders("pending")) == 0
 
+    # Add and delete reminder
+    rem2 = tm.add_reminder("Water plants", due_time=due_dt)
+    assert len(tm.get_reminders("all")) == 2
+    assert tm.delete_reminder(rem2.id) is True
+    assert len(tm.get_reminders("all")) == 1
+
 
 def test_alarm_crud_and_due_check(tmp_path):
     data_file = tmp_path / "test_alarms.json"

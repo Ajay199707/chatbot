@@ -408,6 +408,14 @@ class TaskManager:
                 return True
         return False
 
+    def delete_reminder(self, reminder_id: str) -> bool:
+        orig_count = len(self.reminders)
+        self.reminders = [r for r in self.reminders if r.id != reminder_id and reminder_id not in r.message.lower()]
+        if len(self.reminders) != orig_count:
+            self.save()
+            return True
+        return False
+
     def snooze_reminder(self, reminder_id: str, minutes: int = 5) -> Optional[ReminderItem]:
         for r in self.reminders:
             if r.id == reminder_id or reminder_id in r.message.lower():
@@ -679,6 +687,15 @@ def tool_dismiss_reminder(query: str) -> str:
     return f"No matching reminder found for '{query}'."
 
 
+def tool_delete_reminder(query: str) -> str:
+    """Delete a reminder completely by message keyword or ID."""
+    tm = get_task_manager()
+    deleted = tm.delete_reminder(query)
+    if deleted:
+        return f"Deleted reminder matching '{query}'."
+    return f"No matching reminder found for '{query}'."
+
+
 def tool_snooze_reminder(query: str, minutes: int = 5) -> str:
     """Snooze a reminder for N minutes."""
     tm = get_task_manager()
@@ -800,6 +817,15 @@ TASK_TOOL_SPECS: List[Dict[str, Any]] = [
         },
         "required": ["query"],
         "fn": tool_dismiss_reminder,
+    },
+    {
+        "name": "delete_reminder",
+        "description": "Delete a reminder completely.",
+        "properties": {
+            "query": {"type": "string", "description": "Reminder ID or message keyword."}
+        },
+        "required": ["query"],
+        "fn": tool_delete_reminder,
     },
     {
         "name": "snooze_reminder",

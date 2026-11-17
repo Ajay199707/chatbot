@@ -1911,6 +1911,9 @@ class Chatbot:
                 tool_plan = ("set_alarm", {"time_str": t_str, "label": lbl})
             elif any(kw in lower for kw in ("show alarm", "list alarm", "my alarm", "view alarm", "what alarm", "check alarm")):
                 tool_plan = ("list_alarms", {})
+            elif any(lower.startswith(p) for p in ("delete alarm", "remove alarm", "cancel alarm")):
+                alm_q = re.sub(r"^(?:delete|remove|cancel)\s+alarm\s*", "", user_input, flags=re.IGNORECASE).strip(" ?.:,")
+                tool_plan = ("delete_alarm", {"alarm_id": alm_q or "all"})
 
             # Reminders
             elif any(lower.startswith(p) for p in ("remind me to", "remind me about", "set reminder", "set a reminder", "add reminder", "remind me")):
@@ -1926,9 +1929,9 @@ class Chatbot:
                     tool_plan = ("set_reminder", {"message": cleaned or "Reminder", "time_expr": "in 10 minutes"})
             elif any(kw in lower for kw in ("show reminder", "list reminder", "my reminder", "view reminder", "what reminder", "check reminder")):
                 tool_plan = ("list_reminders", {"status": "pending"})
-            elif any(lower.startswith(p) for p in ("dismiss reminder", "cancel reminder", "remove reminder")):
-                rem_q = re.sub(r"^(?:dismiss|cancel|remove)\s+reminder\s*", "", user_input, flags=re.IGNORECASE).strip(" ?.:,")
-                tool_plan = ("dismiss_reminder", {"query": rem_q or "all"})
+            elif any(lower.startswith(p) for p in ("delete reminder", "remove reminder", "cancel reminder", "dismiss reminder")):
+                rem_q = re.sub(r"^(?:delete|remove|cancel|dismiss)\s+reminder\s*", "", user_input, flags=re.IGNORECASE).strip(" ?.:,")
+                tool_plan = ("delete_reminder", {"query": rem_q or "all"})
 
             # To-Do List
             elif any(lower.startswith(p) for p in ("add todo", "add to do", "add to-do", "add task", "new task", "new todo", "remember to ")):
