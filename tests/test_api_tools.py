@@ -23,7 +23,10 @@ class _HttpRecorder:
 
     def handle(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
         self.calls.append((method.upper(), str(url), kwargs))
-        return self.handler(method.upper(), str(url), kwargs)
+        resp = self.handler(method.upper(), str(url), kwargs)
+        if getattr(resp, "_request", None) is None:
+            resp._request = httpx.Request(method.upper(), str(url))
+        return resp
 
 
 def _install_http_mock(monkeypatch: pytest.MonkeyPatch, handler) -> _HttpRecorder:
@@ -735,3 +738,85 @@ def test_stream_mock_turn_routes_weather_and_find_folder_project(
     tool_ends = [e for e in events_f if e["type"] == "tool_end"]
     assert tool_ends and tool_ends[0]["name"] == "search_files"
     assert str(project_dir) in tool_ends[0]["result"] or "project" in tool_ends[0]["result"].lower()
+
+
+def test_get_live_cricket_scores_spec_and_dispatch():
+    specs = api_tools.get_api_tool_specs()
+    cric_spec = next((s for s in specs if s["name"] == "get_live_cricket_scores"), None)
+    assert cric_spec is not None
+    assert "query" in cric_spec["properties"]
+    assert "get_live_cricket_scores" in api_tools.API_TOOL_NAMES
+
+
+def test_get_live_cricket_scores_mocked_scorecard_and_summary(monkeypatch: pytest.MonkeyPatch):
+    fake_html = """
+    <html>
+      <a href="/live-cricket-scores/151334/aus-vs-eng-3rd-odi-england-tour-of-australia-2026">AUS vs ENG</a>
+      <a href="/live-cricket-scores/170713/sl-vs-pak-2nd-test-sri-lanka-tour-of-pakistan-2026">SL vs PAK</a>
+    </html>
+    """
+    fake_match_json = {
+        "matchHeader": {
+            "matchId": 151334,
+            "matchDescription": "3rd ODI",
+            "seriesName": "England tour of Australia, 2026",
+            "team1": {"id": 2, "name": "Australia"},
+            "team2": {"id": 9, "name": "England"},
+            "venue": {"name": "Bellerive Oval", "city": "Hobart"},
+            "tossResults": {"tossWinnerName": "England", "decision": "Batting"},
+            "status": "Innings Break",
+        },
+        "miniscore": {
+            "status": "Innings Break",
+            "matchScoreDetails": {
+                "inningsScoreList": [
+                    {"batTeamName": "ENG", "score": 328, "wickets": 10, "overs": 48.3}
+                ]
+            },
+            "batsmanStriker": {
+                "name": "Sonny Baker", "runs": 0, "balls": 1, "fours": 0, "sixes": 0, "strikeRate": "0.00"
+            },
+            "bowlerStriker": {
+                "name": "Jack Edwards", "overs": 5.3, "maidens": 0, "runs": 31, "wickets": 4, "economy": 5.64
+            },
+            "currentRunRate": "6.76",
+            "partnerShip": {"runs": 16, "balls": 10},
+            "recentOvsStats": "W 0 | Wd 6 0 2 0 4 1",
+        }
+    }
+
+    def _handler(method: str, url: str, kwargs: Dict[str, Any]) -> httpx.Response:
+        if "cricket-match/live-scores" in url:
+            return httpx.Response(200, text=fake_html)
+        if "api/mcenter/comm" in url:
+            return httpx.Response(200, json=fake_match_json)
+        return httpx.Response(404, text="Not Found")
+
+    _install_http_mock(monkeypatch, _handler)
+
+    # 1. Specific match query returns detailed scorecard with markdown table
+    res_aus = api_tools.get_live_cricket_scores(query="australia")
+    assert "### 🏏 Australia vs England (3rd ODI)" in res_aus
+    assert "**Series:** England tour of Australia, 2026" in res_aus
+    assert "Bellerive Oval, Hobart" in res_aus
+    assert "**ENG**: 328/10 in 48.3 overs" in res_aus
+    assert "| Batter | R | B | 4s | 6s | SR |" in res_aus
+    assert "Sonny Baker*" in res_aus
+    assert "| Bowler | O | M | R | W | Econ |" in res_aus
+    assert "Jack Edwards" in res_aus
+    assert "CRR: **6.76**" in res_aus
+    assert "**Partnership:** 16 runs off 10 balls" in res_aus
+
+    # 2. General query returns matches summary
+    res_summary = api_tools.get_live_cricket_scores(query="")
+    assert "### 🏏 Live & Upcoming Cricket Matches" in res_summary
+    assert "Australia vs England" in res_summary
+
+    # 3. Direct numeric ID query
+    res_id = api_tools.get_live_cricket_scores(query="151334")
+    assert "### 🏏 Australia vs England" in res_id
+
+    # 4. Dispatch via execute_api_tool
+    res_exec = api_tools.execute_api_tool("get_live_cricket_scores", {"query": "aus"})
+    assert "### 🏏 Australia vs England" in res_exec
+

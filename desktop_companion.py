@@ -212,7 +212,7 @@ PERSONA_PRESETS: Dict[str, str] = {
 # CONFIG & MARKDOWN HELPERS
 # ============================================================
 
-TOPIC_KINDS: Tuple[str, ...] = ("news", "gold", "weather", "web_search", "custom_prompt")
+TOPIC_KINDS: Tuple[str, ...] = ("news", "gold", "weather", "cricket", "web_search", "custom_prompt")
 
 
 def default_custom_topics() -> List[Dict[str, Any]]:
@@ -248,6 +248,14 @@ def default_custom_topics() -> List[Dict[str, Any]]:
             "kind": "weather",
             "query": "",
             "prompt": "",
+            "enabled": True,
+        },
+        {
+            "id": "cricket",
+            "label": "Cricket",
+            "kind": "cricket",
+            "query": "live cricket scores",
+            "prompt": "Show me live cricket scores and match updates.",
             "enabled": True,
         },
         {
@@ -706,6 +714,8 @@ def topic_prompt_for_config(topic: Dict[str, Any], cfg: CharacterConfig) -> str:
         return f"What is today's weather in {target_city}?"
     if kind == "gold":
         return "What is today's gold rate and silver rate in India?"
+    if kind == "cricket":
+        return f"Show me live cricket scores and match updates for {query or 'today'}."
     if kind == "news":
         return f"What is the latest news in {query or label}?"
     if kind == "web_search":
@@ -830,6 +840,8 @@ def _fetch_single_topic_summary(topic: Dict[str, Any], cfg: CharacterConfig) -> 
         return _summarize_briefing_lines(chatbot.get_india_gold_price(), max_items=2)
     if kind == "weather":
         return _summarize_briefing_lines(api_tools.get_weather(raw_query or city, days=1), max_items=2)
+    if kind == "cricket":
+        return _summarize_briefing_lines(api_tools.get_live_cricket_scores(raw_query or "live"), max_items=2)
     if kind == "news":
         return _summarize_briefing_lines(api_tools.get_news(query or "latest news"), max_items=2)
     if kind == "web_search":
@@ -869,7 +881,7 @@ def build_effective_system_prompt(
         parts.append(
             "When the user asks about live weather (use get_weather), web information (web_search), "
             "gold/silver prices in India (get_india_gold_price), latest news (get_news), current date/time "
-            "(get_current_datetime), maps/places/directions (maps_lookup), databases (database_query), "
+            "(get_current_datetime), live cricket scores/updates (get_live_cricket_scores), maps/places/directions (maps_lookup), databases (database_query), "
             "email (email_action), calendar events (calendar_action), payments (payment_action), "
             "or custom/company internal APIs (list_custom_apis / call_custom_api), call your available tools first "
             "and report the real-time result honestly."
@@ -3518,6 +3530,7 @@ class TopicEditorDialog(QtWidgets.QDialog):
 
     _KIND_CHOICES: Tuple[Tuple[str, str], ...] = (
         ("news", "News Headlines (Google News RSS / NewsAPI)"),
+        ("cricket", "Live Cricket Scores & Match Updates (Cricbuzz)"),
         ("gold", "India Gold & Silver Rate"),
         ("weather", "Live Weather Forecast"),
         ("web_search", "Web Search (Tavily / DuckDuckGo)"),
@@ -3589,6 +3602,7 @@ class TopicEditorDialog(QtWidgets.QDialog):
         kind = str(self._kind_combo.currentData() or "news")
         placeholders = {
             "news": "e.g., technology AI software, cinema movies, cricket",
+            "cricket": "Optional team or match query (blank = top live matches, or 'India', 'Australia', 'IPL')",
             "gold": "Optional note (uses live India gold & silver rates)",
             "weather": "Optional city override (blank = use default Weather City)",
             "web_search": "e.g., ISRO latest launch, Nifty 50 market today",

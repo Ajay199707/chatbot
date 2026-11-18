@@ -740,6 +740,209 @@ def get_news(keyword: str) -> str:
 
 
 # ============================================================
+# 3B. CRICBUZZ LIVE CRICKET SCORES & MATCH SCORECARDS
+# ============================================================
+
+CRICBUZZ_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,application/json,*/*;q=0.8",
+    "Referer": "https://www.cricbuzz.com/",
+}
+
+
+def get_live_cricket_scores(query: str = "") -> str:
+    """Fetch real-time cricket scores, match status, and mini-scorecards from Cricbuzz."""
+    list_url = "https://www.cricbuzz.com/cricket-match/live-scores"
+    clean_q = (query or "").strip().lower()
+
+    try:
+        with httpx.Client(timeout=HTTP_TIMEOUT, headers=CRICBUZZ_HEADERS) as client:
+            # If a direct numeric match ID was provided, fetch that match directly
+            if clean_q.isdigit():
+                return _format_cricbuzz_scorecard(client, clean_q)
+
+            resp = client.get(list_url)
+            resp.raise_for_status()
+            html_text = resp.text
+
+            matches: List[Dict[str, str]] = []
+            seen = set()
+            for mid, slug in re.findall(r'href="/live-cricket-scores/(\d+)/([^"]+)"', html_text):
+                if mid not in seen:
+                    seen.add(mid)
+                    title = slug.replace("-", " ")
+                    matches.append({"id": mid, "slug": slug, "title": title})
+
+            if not matches:
+                return "No active cricket matches found on Cricbuzz right now."
+
+            # Filter search terms to find specific team or match query
+            search_terms = [
+                w for w in re.split(r"[\s,]+", clean_q)
+                if w and w not in (
+                    "cricket", "live", "score", "scores", "match", "matches",
+                    "update", "updates", "today", "todays", "what", "is", "the",
+                    "show", "get", "tell", "me", "scorecard", "board", "status"
+                )
+            ]
+
+            selected_match = None
+            if search_terms:
+                best_mid = None
+                best_score = 0
+                for m in matches:
+                    t = m["slug"].lower()
+                    hit_score = sum(2 if term in t else 0 for term in search_terms)
+                    if hit_score > best_score:
+                        best_score = hit_score
+                        best_mid = m
+                if best_mid and best_score > 0:
+                    selected_match = best_mid
+
+            if selected_match:
+                return _format_cricbuzz_scorecard(client, selected_match["id"])
+
+            return _format_cricbuzz_summary(client, matches[:5])
+    except Exception as exc:
+        return f"Error fetching live cricket scores: {exc}"
+
+
+def _format_cricbuzz_scorecard(client: httpx.Client, match_id: str) -> str:
+    api_url = f"https://www.cricbuzz.com/api/mcenter/comm/{match_id}"
+    try:
+        resp = client.get(api_url)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        return f"Error fetching match {match_id} scorecard: {exc}"
+
+    hdr = data.get("matchHeader", {})
+    mini = data.get("miniscore", {})
+
+    t1 = hdr.get("team1", {}).get("name", "Team 1")
+    t2 = hdr.get("team2", {}).get("name", "Team 2")
+    m_desc = hdr.get("matchDescription", "")
+    series = hdr.get("seriesName") or hdr.get("seriesDesc", "")
+    status = mini.get("status") or hdr.get("status", "")
+    venue = hdr.get("venue", {})
+    venue_str = f"{venue.get('name', '')}, {venue.get('city', '')}".strip(" ,")
+
+    out: List[str] = [f"### 🏏 {t1} vs {t2}" + (f" ({m_desc})" if m_desc else "")]
+    if series:
+        out.append(f"**Series:** {series}")
+    if venue_str:
+        out.append(f"**Venue:** {venue_str}")
+
+    toss = hdr.get("tossResults", {})
+    if toss.get("tossWinnerName"):
+        out.append(f"**Toss:** {toss.get('tossWinnerName')} elected to {toss.get('decision', '').lower()}")
+
+    # Scores
+    score_details = mini.get("matchScoreDetails", {})
+    innings_list = score_details.get("inningsScoreList") or []
+    if innings_list:
+        out.append("\n**Scores:**")
+        for inn in innings_list:
+            b_name = inn.get("batTeamName", "")
+            sc = inn.get("score", 0)
+            wkts = inn.get("wickets", 0)
+            ovs = inn.get("overs", 0)
+            decl = " (dec)" if inn.get("isDeclared") else ""
+            out.append(f"- **{b_name}**: {sc}/{wkts} in {ovs} overs{decl}")
+
+    if status:
+        out.append(f"\n**Status:** {status}")
+
+    # Batters on strike
+    striker = mini.get("batsmanStriker")
+    non_striker = mini.get("batsmanNonStriker")
+    if striker and striker.get("name"):
+        out.append("\n**Current Batters:**")
+        out.append("| Batter | R | B | 4s | 6s | SR |")
+        out.append("| :--- | :---: | :---: | :---: | :---: | :---: |")
+        out.append(
+            f"| **{striker.get('name', '')}*** | {striker.get('runs', 0)} | {striker.get('balls', 0)} | "
+            f"{striker.get('fours', 0)} | {striker.get('sixes', 0)} | {striker.get('strikeRate', 0)} |"
+        )
+        if non_striker and non_striker.get("name"):
+            out.append(
+                f"| {non_striker.get('name', '')} | {non_striker.get('runs', 0)} | {non_striker.get('balls', 0)} | "
+                f"{non_striker.get('fours', 0)} | {non_striker.get('sixes', 0)} | {non_striker.get('strikeRate', 0)} |"
+            )
+
+    # Bowler
+    bowler = mini.get("bowlerStriker")
+    if bowler and bowler.get("name"):
+        out.append("\n**Current Bowler:**")
+        out.append("| Bowler | O | M | R | W | Econ |")
+        out.append("| :--- | :---: | :---: | :---: | :---: | :---: |")
+        out.append(
+            f"| **{bowler.get('name', '')}** | {bowler.get('overs', 0)} | {bowler.get('maidens', 0)} | "
+            f"{bowler.get('runs', 0)} | {bowler.get('wickets', 0)} | {bowler.get('economy', 0)} |"
+        )
+
+    # Rates
+    rates = []
+    if mini.get("currentRunRate"):
+        rates.append(f"CRR: **{mini['currentRunRate']}**")
+    if mini.get("requiredRunRate"):
+        rates.append(f"RRR: **{mini['requiredRunRate']}**")
+    if mini.get("target"):
+        rates.append(f"Target: **{mini['target']}**")
+    if rates:
+        out.append(f"\n{' · '.join(rates)}")
+
+    partnership = mini.get("partnerShip")
+    if partnership and isinstance(partnership, dict):
+        p_runs = partnership.get("runs", 0)
+        p_balls = partnership.get("balls", 0)
+        out.append(f"**Partnership:** {p_runs} runs off {p_balls} balls")
+
+    if mini.get("recentOvsStats"):
+        out.append(f"**Recent Balls:** `{mini['recentOvsStats'].strip()}`")
+
+    return "\n".join(out)
+
+
+def _format_cricbuzz_summary(client: httpx.Client, match_list: List[Dict[str, str]]) -> str:
+    out: List[str] = ["### 🏏 Live & Upcoming Cricket Matches\n"]
+    for m in match_list:
+        mid = m["id"]
+        api_url = f"https://www.cricbuzz.com/api/mcenter/comm/{mid}"
+        try:
+            resp = client.get(api_url)
+            resp.raise_for_status()
+            data = resp.json()
+            hdr = data.get("matchHeader", {})
+            mini = data.get("miniscore", {})
+            t1 = hdr.get("team1", {}).get("name", "")
+            t2 = hdr.get("team2", {}).get("name", "")
+            title = f"{t1} vs {t2}" if (t1 and t2) else m["title"]
+            desc = hdr.get("matchDescription", "")
+            series = hdr.get("seriesName", "")
+            status = mini.get("status") or hdr.get("status", "Scheduled")
+
+            score_parts = []
+            for inn in mini.get("matchScoreDetails", {}).get("inningsScoreList") or []:
+                score_parts.append(
+                    f"{inn.get('batTeamName')}: {inn.get('score')}/{inn.get('wickets')} ({inn.get('overs')} ov)"
+                )
+            score_str = " · ".join(score_parts) if score_parts else "Yet to bat"
+
+            out.append(f"**{title}**" + (f" ({desc})" if desc else ""))
+            if series:
+                out.append(f"- *Series:* {series}")
+            out.append(f"- *Score:* {score_str}")
+            out.append(f"- *Status:* {status}\n")
+        except Exception:
+            out.append(f"**{m['title']}**\n- *Match ID:* {mid}\n")
+    return "\n".join(out)
+
+
+# ============================================================
 # 4. MAPS API (Google Maps if key set + OpenStreetMap fallback)
 # ============================================================
 
@@ -1613,6 +1816,22 @@ def get_api_tool_specs(custom_apis_path: Optional[Path] = None) -> List[Dict[str
             "required": ["location"],
         },
         {
+            "name": "get_live_cricket_scores",
+            "description": (
+                "Get real-time live cricket scores, mini-scorecards, wickets, overs, current batters, "
+                "bowler stats, run rates, and upcoming match schedules from Cricbuzz. "
+                "Use this whenever the user asks for live cricket scores, match updates, "
+                "or ongoing series details (e.g. India, Australia, England, IPL, World Cup, Test matches)."
+            ),
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Optional team name, match name, or keyword (e.g. 'India', 'Australia', 'Pakistan', 'IPL'). If omitted, returns top live matches.",
+                },
+            },
+            "required": [],
+        },
+        {
             "name": "maps_lookup",
             "description": (
                 "Look up places, geocode addresses/coordinates, or get directions/distances using "
@@ -1775,6 +1994,7 @@ def get_api_tool_specs(custom_apis_path: Optional[Path] = None) -> List[Dict[str
 
 API_TOOL_NAMES = {
     "get_weather",
+    "get_live_cricket_scores",
     "maps_lookup",
     "database_query",
     "email_action",
@@ -1797,6 +2017,10 @@ def execute_api_tool(
         return get_weather(
             location=str(args.get("location", "")),
             days=args.get("days", 3),
+        )
+    if name == "get_live_cricket_scores":
+        return get_live_cricket_scores(
+            query=str(args.get("query", "")),
         )
     if name == "maps_lookup":
         return maps_lookup(

@@ -829,3 +829,20 @@ def test_gemini_vision_payload_construction():
     assert parts[1] == {"text": "Explain this chart"}
 
 
+def test_mock_stream_turn_routes_cricket_scores(monkeypatch):
+    import api_tools
+    monkeypatch.setattr(
+        api_tools,
+        "get_live_cricket_scores",
+        lambda query="": f"### 🏏 Live Match Update for {query}: IND 280/4 (45.2 ov)"
+    )
+
+    bot = chatbot.Chatbot(chatbot.ChatbotConfig(provider="mock", use_tools=True))
+    events = list(bot.stream_turn("What is the live cricket score of India match?"))
+    assert any(e["type"] == "tool_start" and e["name"] == "get_live_cricket_scores" for e in events)
+    tool_end = next(e for e in events if e["type"] == "tool_end")
+    assert tool_end["name"] == "get_live_cricket_scores"
+    assert "IND 280/4" in tool_end["result"]
+
+
+

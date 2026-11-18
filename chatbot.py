@@ -857,9 +857,9 @@ def _build_text_tool_system_prompt(include_web: bool, include_system: bool) -> s
         tool_lines.append(f"- {spec['name']} (params: {params}): {short_desc}")
     return (
         "IMPORTANT: You have live real-time tools available. Whenever the user asks for live "
-        "data (weather, gold/silver prices, news, web search, maps, database, email, calendar, "
+        "data (weather, cricket scores, gold/silver prices, news, web search, maps, database, email, calendar, "
         "payments, custom APIs, current date/time, or PC files/folders/apps), you MUST invoke "
-        "a tool FIRST instead of answering from memory or guessing prices/weather.\n"
+        "a tool FIRST instead of answering from memory or guessing prices/weather/scores.\n"
         "Available tools:\n"
         + "\n".join(tool_lines)
         + "\n\nCRITICAL OUTPUT FORMAT WHEN CALLING A TOOL:\n"
@@ -2034,6 +2034,16 @@ class Chatbot:
                 tool_plan = ("get_weather", {"location": city}) if city else None
             elif any(kw in lower for kw in ("custom api", "custom apis", "registered api", "internal api")):
                 tool_plan = ("list_custom_apis", {})
+            elif any(kw in lower for kw in ("cricket", "ipl", "match score", "live score", "scorecard")):
+                clean_target = (
+                    re.sub(
+                        r"\b(?:what|is|are|today's|todays|today|latest|live|recent|the|in|on|cricket|score|scores|match|scorecard|update|updates|give|tell|show|me)\b",
+                        "",
+                        user_input,
+                        flags=re.IGNORECASE,
+                    ).strip(" ?.:,'\"")
+                )
+                tool_plan = ("get_live_cricket_scores", {"query": clean_target})
             elif "gold" in lower or "silver" in lower:
                 tool_plan = ("get_india_gold_price", {})
             elif any(

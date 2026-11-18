@@ -682,7 +682,7 @@ def test_time_of_day_greeting_and_wake_greeting_data():
     assert "Welcome back!" in data["headline"]
     assert "How can I assist you?" in data["headline"]
     labels = [t["label"] for t in data["topics"]]
-    assert labels == ["Tech Field", "Cinema", "Gold Rate", "Weather", "Top News"]
+    assert labels == ["Tech Field", "Cinema", "Gold Rate", "Weather", "Cricket", "Top News"]
     weather_topic = next(t for t in data["topics"] if t["id"] == "weather")
     assert "Hyderabad" in weather_topic["prompt"]
 
@@ -1458,6 +1458,23 @@ def test_chat_bubble_height_sync_prevents_overlap():
         )
     finally:
         popup.deleteLater()
+
+
+def test_cricket_topic_prompt_and_briefing_summary(monkeypatch):
+    cfg = dc.CharacterConfig(character_id="lumi")
+    topic = {"id": "cricket", "label": "Cricket", "kind": "cricket", "query": "live cricket scores"}
+
+    prompt = dc.topic_prompt_for_config(topic, cfg)
+    assert "live cricket scores" in prompt
+
+    monkeypatch.setattr(
+        dc.api_tools,
+        "get_live_cricket_scores",
+        lambda query="": "### 🏏 Live Cricket\nAUS vs ENG: 328/10 (48.3 ov)\nInnings Break\n"
+    )
+    summary = dc._fetch_single_topic_summary(topic, cfg)
+    assert "AUS vs ENG" in summary or "Live Cricket" in summary
+
 
 
 
