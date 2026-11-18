@@ -295,7 +295,7 @@ def _normalize_topic_entry(entry: Any, index: int = 0) -> Optional[Dict[str, Any
 
 def _resolved_topics(topics: Any) -> List[Dict[str, Any]]:
     """Return normalized topic dicts, falling back to defaults only when unset/invalid."""
-    if not isinstance(topics, list):
+    if not isinstance(topics, list) or not topics:
         return default_custom_topics()
     cleaned: List[Dict[str, Any]] = []
     seen_ids: set[str] = set()
@@ -669,6 +669,17 @@ class CharacterConfig:
             cfg = cls(**filtered)
             if cfg.model_name:
                 cfg.model_name = chatbot.normalize_model_for_provider(cfg.provider, cfg.model_name)
+            if isinstance(cfg.custom_topics, list):
+                topic_ids = {t.get("id") for t in cfg.custom_topics if isinstance(t, dict)}
+                if "cricket" not in topic_ids and {"tech", "cinema", "gold", "weather", "news"}.issubset(topic_ids):
+                    cfg.custom_topics.append({
+                        "id": "cricket",
+                        "label": "Cricket",
+                        "kind": "cricket",
+                        "query": "live cricket scores",
+                        "prompt": "Show me live cricket scores and match updates.",
+                        "enabled": True,
+                    })
             cfg.custom_topics = _resolved_topics(cfg.custom_topics)
             clean_cid = str(getattr(cfg, "character_id", "") or "lumi").strip().lower()
             if clean_cid not in CHARACTER_PRESETS:
