@@ -1210,3 +1210,106 @@ def test_alarm_sound_theme_and_voice_briefing_config(tmp_path, monkeypatch):
         popup.deleteLater()
 
 
+def test_ui_themes_registry_and_fallback():
+    expected_themes = [
+        "deep_slate",
+        "cyberpunk_teal",
+        "neon_green",
+        "sakura_pink",
+        "electric_purple",
+        "sunset_amber",
+    ]
+    for tid in expected_themes:
+        assert tid in dc.UI_THEMES
+        theme = dc.get_ui_theme(tid)
+        assert theme.id == tid
+        assert theme.name
+        assert theme.accent_color.startswith("#")
+        assert theme.primary_gradient_start.startswith("#")
+        assert theme.primary_gradient_end.startswith("#")
+
+    # Fallback checks
+    assert dc.get_ui_theme("invalid_theme_name").id == "deep_slate"
+    assert dc.get_ui_theme(None).id == "deep_slate"
+    assert dc.get_ui_theme("").id == "deep_slate"
+
+
+def test_ui_theme_qss_generators():
+    for tid, theme in dc.UI_THEMES.items():
+        chat_qss = dc.get_chat_frame_qss(theme)
+        assert "#popupFrame" in chat_qss
+        assert theme.accent_color in chat_qss
+
+        dialog_qss = dc.get_dialog_qss(theme)
+        assert "QDialog" in dialog_qss
+        assert theme.accent_color in dialog_qss
+
+        tasks_qss = dc.get_tasks_dialog_qss(theme)
+        assert "QDialog" in tasks_qss
+        assert theme.accent_color in tasks_qss
+
+
+def test_character_config_ui_theme_roundtrip(tmp_path):
+    cfg = dc.CharacterConfig(ui_theme="cyberpunk_teal")
+    p = tmp_path / "cfg.json"
+    cfg.save(p)
+    loaded = dc.CharacterConfig.load(p)
+    assert loaded.ui_theme == "cyberpunk_teal"
+
+    # Test unknown theme fallback
+    bad_p = tmp_path / "bad_cfg.json"
+    bad_p.write_text('{"ui_theme": "neon_rainbow_fantasy"}', encoding="utf-8")
+    loaded_bad = dc.CharacterConfig.load(bad_p)
+    assert loaded_bad.ui_theme == "deep_slate"
+
+
+def test_settings_dialog_ui_theme_selection():
+    _get_qapp()
+    cfg = dc.CharacterConfig(ui_theme="sakura_pink")
+    dlg = dc.SettingsDialog(cfg)
+    try:
+        assert hasattr(dlg, "_theme_combo")
+        assert dlg._theme_combo.count() == len(dc.UI_THEMES)
+        assert dlg._theme_combo.currentData() == "sakura_pink"
+
+        # Change theme to neon_green
+        idx = dlg._theme_combo.findData("neon_green")
+        assert idx >= 0
+        dlg._theme_combo.setCurrentIndex(idx)
+        assert dlg._theme.id == "neon_green"
+
+        updated = dlg.updated_config()
+        assert updated.ui_theme == "neon_green"
+    finally:
+        dlg.deleteLater()
+
+
+def test_chat_popup_and_tasks_dialog_apply_theme():
+    _get_qapp()
+    cfg = dc.CharacterConfig(ui_theme="electric_purple")
+    popup = dc.ChatPopupWindow(cfg)
+    tasks_dlg = dc.TasksDialog(config=cfg)
+    try:
+        theme = dc.get_ui_theme("electric_purple")
+        popup.apply_config(cfg)
+        assert popup._config.ui_theme == "electric_purple"
+
+        tasks_dlg.apply_config(cfg)
+        assert tasks_dlg._theme.id == "electric_purple"
+        assert theme.accent_color in tasks_dlg._title_lbl.styleSheet()
+
+        # Switch to sunset_amber
+        cfg.ui_theme = "sunset_amber"
+        popup.apply_config(cfg)
+        assert popup._config.ui_theme == "sunset_amber"
+
+        tasks_dlg.apply_config(cfg)
+        amber_theme = dc.get_ui_theme("sunset_amber")
+        assert tasks_dlg._theme.id == "sunset_amber"
+        assert amber_theme.accent_color in tasks_dlg._title_lbl.styleSheet()
+    finally:
+        popup.deleteLater()
+        tasks_dlg.deleteLater()
+
+
+

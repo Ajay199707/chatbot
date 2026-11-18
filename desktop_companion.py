@@ -307,6 +307,273 @@ def _resolved_topics(topics: Any) -> List[Dict[str, Any]]:
     return cleaned
 
 
+@dataclass(frozen=True)
+class UITheme:
+    id: str
+    name: str
+    accent_color: str
+    accent_hover: str
+    accent_active: str
+    primary_gradient_start: str
+    primary_gradient_end: str
+    card_bg: str
+    card_border: str
+    halo_color: str
+    user_bubble_start: str
+    user_bubble_end: str
+    user_bubble_border: str
+    tab_highlight: str
+    dialog_bg: str = "#0b1120"
+    dialog_pane_bg: str = "#0f172a"
+
+
+UI_THEMES: Dict[str, UITheme] = {
+    "deep_slate": UITheme(
+        id="deep_slate",
+        name="Default Deep Slate",
+        accent_color="#38bdf8",
+        accent_hover="#0284c7",
+        accent_active="#7dd3fc",
+        primary_gradient_start="#2563eb",
+        primary_gradient_end="#38bdf8",
+        card_bg="#111c33",
+        card_border="rgba(56, 189, 248, 0.35)",
+        halo_color="rgba(56, 189, 248, 0.45)",
+        user_bubble_start="#2563eb",
+        user_bubble_end="#1d4ed8",
+        user_bubble_border="rgba(255, 255, 255, 0.12)",
+        tab_highlight="#38bdf8",
+        dialog_bg="#0b1120",
+        dialog_pane_bg="#0f172a",
+    ),
+    "cyberpunk_teal": UITheme(
+        id="cyberpunk_teal",
+        name="Cyberpunk Teal",
+        accent_color="#2dd4bf",
+        accent_hover="#0d9488",
+        accent_active="#5eead4",
+        primary_gradient_start="#0f766e",
+        primary_gradient_end="#2dd4bf",
+        card_bg="#0b2427",
+        card_border="rgba(45, 212, 191, 0.40)",
+        halo_color="rgba(45, 212, 191, 0.45)",
+        user_bubble_start="#0d9488",
+        user_bubble_end="#115e59",
+        user_bubble_border="rgba(45, 212, 191, 0.25)",
+        tab_highlight="#2dd4bf",
+        dialog_bg="#061417",
+        dialog_pane_bg="#0b1d22",
+    ),
+    "neon_green": UITheme(
+        id="neon_green",
+        name="Ben 10 Neon Green",
+        accent_color="#22c55e",
+        accent_hover="#16a34a",
+        accent_active="#4ade80",
+        primary_gradient_start="#15803d",
+        primary_gradient_end="#22c55e",
+        card_bg="#0c2412",
+        card_border="rgba(34, 197, 94, 0.40)",
+        halo_color="rgba(34, 197, 94, 0.45)",
+        user_bubble_start="#16a34a",
+        user_bubble_end="#14532d",
+        user_bubble_border="rgba(34, 197, 94, 0.25)",
+        tab_highlight="#22c55e",
+        dialog_bg="#06150a",
+        dialog_pane_bg="#0b1f10",
+    ),
+    "sakura_pink": UITheme(
+        id="sakura_pink",
+        name="Sakura Pink",
+        accent_color="#f472b6",
+        accent_hover="#db2777",
+        accent_active="#f9a8d4",
+        primary_gradient_start="#be185d",
+        primary_gradient_end="#f472b6",
+        card_bg="#260e20",
+        card_border="rgba(244, 114, 182, 0.40)",
+        halo_color="rgba(244, 114, 182, 0.45)",
+        user_bubble_start="#db2777",
+        user_bubble_end="#9d174d",
+        user_bubble_border="rgba(244, 114, 182, 0.25)",
+        tab_highlight="#f472b6",
+        dialog_bg="#170714",
+        dialog_pane_bg="#200d1c",
+    ),
+    "electric_purple": UITheme(
+        id="electric_purple",
+        name="Electric Purple",
+        accent_color="#c084fc",
+        accent_hover="#9333ea",
+        accent_active="#d8b4fe",
+        primary_gradient_start="#7c3aed",
+        primary_gradient_end="#c084fc",
+        card_bg="#220f38",
+        card_border="rgba(192, 132, 252, 0.40)",
+        halo_color="rgba(192, 132, 252, 0.45)",
+        user_bubble_start="#7c3aed",
+        user_bubble_end="#6b21a8",
+        user_bubble_border="rgba(192, 132, 252, 0.25)",
+        tab_highlight="#c084fc",
+        dialog_bg="#120720",
+        dialog_pane_bg="#1b0c2e",
+    ),
+    "sunset_amber": UITheme(
+        id="sunset_amber",
+        name="Sunset Amber",
+        accent_color="#f59e0b",
+        accent_hover="#d97706",
+        accent_active="#fbbf24",
+        primary_gradient_start="#ea580c",
+        primary_gradient_end="#f59e0b",
+        card_bg="#2a1708",
+        card_border="rgba(245, 158, 11, 0.40)",
+        halo_color="rgba(245, 158, 11, 0.45)",
+        user_bubble_start="#ea580c",
+        user_bubble_end="#c2410c",
+        user_bubble_border="rgba(245, 158, 11, 0.25)",
+        tab_highlight="#f59e0b",
+        dialog_bg="#180d05",
+        dialog_pane_bg="#231409",
+    ),
+}
+
+
+def get_ui_theme(theme_id: Optional[str] = None) -> UITheme:
+    """Return the UITheme instance for theme_id or fall back to 'deep_slate'."""
+    clean_id = str(theme_id or "").strip().lower()
+    return UI_THEMES.get(clean_id, UI_THEMES["deep_slate"])
+
+
+def get_chat_frame_qss(theme: UITheme) -> str:
+    """Return QSS stylesheet for ChatPopupWindow frame styled with active theme."""
+    return f"""
+        #popupFrame {{
+            background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 {theme.dialog_pane_bg}, stop:1 {theme.dialog_bg});
+            border: 1.5px solid {theme.card_border};
+            border-radius: 18px;
+        }}
+        QLabel {{ color: #e2e8f0; }}
+        QPushButton {{
+            background: rgba(30, 41, 59, 0.75);
+            color: #e2e8f0;
+            border: 1px solid rgba(51, 65, 85, 0.8);
+            border-radius: 8px;
+            padding: 4px 8px;
+            font-size: 11px;
+            font-weight: 600;
+        }}
+        QPushButton:hover {{ background: rgba(51, 65, 85, 0.95); border-color: {theme.accent_color}; }}
+        QPushButton#sendBtn {{
+            background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {theme.primary_gradient_start}, stop:1 {theme.primary_gradient_end});
+            border: none;
+            color: #ffffff;
+            padding: 7px 16px;
+            border-radius: 9px;
+            font-size: 12px;
+            font-weight: bold;
+        }}
+        QPushButton#sendBtn:hover {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {theme.accent_hover}, stop:1 {theme.primary_gradient_start}); }}
+        QPushButton#stopBtn {{
+            background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #dc2626, stop:1 #f87171);
+            border: none;
+            color: #ffffff;
+            padding: 7px 16px;
+            border-radius: 9px;
+            font-size: 12px;
+            font-weight: bold;
+        }}
+        QPlainTextEdit {{
+            background: rgba(11, 17, 32, 0.85);
+            color: #f8fafc;
+            border: 1.5px solid #334155;
+            border-radius: 12px;
+            padding: 10px 12px;
+            font-size: 13px;
+        }}
+        QPlainTextEdit:focus {{
+            border: 1.5px solid {theme.accent_color};
+        }}
+        QScrollArea {{ border: none; background: transparent; }}
+        QScrollBar:vertical {{
+            background: transparent;
+            width: 6px;
+            margin: 0;
+        }}
+        QScrollBar::handle:vertical {{
+            background: rgba(148, 163, 184, 0.35);
+            border-radius: 3px;
+            min-height: 24px;
+        }}
+        QScrollBar::handle:vertical:hover {{
+            background: {theme.card_border};
+        }}
+        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+            height: 0px;
+        }}
+    """
+
+
+def get_dialog_qss(theme: UITheme) -> str:
+    """Return common dialog stylesheet styled with active theme."""
+    return (
+        f"QDialog{{background:{theme.dialog_bg};color:#e2e8f0;font-size:12px;}}"
+        "QLabel,QCheckBox{color:#cbd5e1;font-weight:600;}"
+        "QCheckBox{spacing:8px;}"
+        f"QGroupBox{{background:{theme.card_bg};border:1px solid #293548;border-radius:10px;"
+        f"margin-top:10px;padding:12px 12px 8px 12px;font-weight:700;color:{theme.accent_color};}}"
+        "QGroupBox::title{subcontrol-origin:margin;left:12px;padding:0 6px;}"
+        f"QTabWidget::pane{{border:1px solid #293548;border-radius:10px;background:{theme.dialog_pane_bg};top:-1px;}}"
+        "QTabBar::tab{background:#1e293b;color:#94a3b8;border:1px solid #293548;"
+        "border-bottom:none;border-top-left-radius:8px;border-top-right-radius:8px;"
+        "padding:7px 14px;margin-right:4px;font-weight:600;}"
+        f"QTabBar::tab:selected{{background:{theme.primary_gradient_start};color:#ffffff;border-color:{theme.primary_gradient_start};}}"
+        "QTabBar::tab:hover:!selected{background:#293548;color:#e2e8f0;}"
+        "QLineEdit,QComboBox,QPlainTextEdit,QSpinBox,QListWidget{background:#1e293b;color:#f8fafc;"
+        "border:1px solid #334155;border-radius:7px;padding:4px 8px;}"
+        "QListWidget::item{padding:5px 6px;border-radius:5px;}"
+        f"QListWidget::item:selected{{background:{theme.primary_gradient_start};color:#ffffff;}}"
+        f"QLineEdit:focus,QComboBox:focus,QPlainTextEdit:focus,QSpinBox:focus,QListWidget:focus{{border-color:{theme.accent_color};}}"
+        "QPushButton{background:#1e293b;color:#e2e8f0;border:1px solid #334155;"
+        "border-radius:7px;padding:5px 12px;font-weight:600;}"
+        f"QPushButton:hover{{background:#334155;border-color:{theme.accent_color};}}"
+        f"QPushButton#primaryBtn{{background:{theme.primary_gradient_start};color:#ffffff;border-color:{theme.primary_gradient_start};}}"
+        f"QPushButton#primaryBtn:hover{{background:{theme.accent_hover};}}"
+    )
+
+
+def get_tasks_dialog_qss(theme: UITheme) -> str:
+    """Return TasksDialog stylesheet styled with active theme."""
+    return (
+        f"QDialog {{ background: {theme.dialog_bg}; color: #f8fafc; }}"
+        "QLabel {{ color: #f8fafc; }}"
+        "QLineEdit {{ background: #1e293b; color: #f8fafc; border: 1px solid #334155; border-radius: 6px; padding: 6px 10px; font-size: 13px; min-height: 22px; }}"
+        f"QLineEdit:focus {{ border-color: {theme.accent_color}; }}"
+        "QComboBox {{ background: #1e293b; color: #f8fafc; border: 1px solid #334155; border-radius: 6px; padding: 5px 10px; font-size: 12px; min-height: 22px; }}"
+        f"QComboBox:hover {{ border-color: {theme.accent_color}; }}"
+        f"QComboBox QAbstractItemView {{ background-color: #1e293b; color: #f8fafc; selection-background-color: {theme.accent_hover}; selection-color: #ffffff; border: 1px solid #475569; border-radius: 6px; padding: 4px; outline: none; }}"
+        "QComboBox QAbstractItemView::item {{ color: #f8fafc; padding: 6px 12px; min-height: 24px; border-radius: 4px; }}"
+        f"QComboBox QAbstractItemView::item:hover {{ background-color: #334155; color: {theme.accent_color}; }}"
+        f"QComboBox QAbstractItemView::item:selected {{ background-color: {theme.accent_hover}; color: #ffffff; }}"
+        "QPushButton {{ background: #1e293b; color: #f8fafc; border: 1px solid #334155; border-radius: 6px; padding: 6px 14px; font-size: 12px; font-weight: 500; }}"
+        f"QPushButton:hover {{ background: #334155; border-color: {theme.accent_color}; }}"
+        f"QPushButton:checked {{ background: {theme.accent_hover}; color: #ffffff; font-weight: bold; border-color: {theme.accent_color}; }}"
+        f"QTabWidget, QTabWidget > QWidget, QTabBar {{ background: {theme.dialog_bg}; }}"
+        f"QTabWidget::pane {{ border: 1px solid #1e293b; background: {theme.dialog_pane_bg}; border-radius: 8px; }}"
+        "QTabBar::tab {{ background: #1e293b; color: #94a3b8; padding: 8px 20px; border-top-left-radius: 6px; border-top-right-radius: 6px; font-weight: bold; margin-right: 4px; font-size: 13px; }}"
+        f"QTabBar::tab:selected {{ background: {theme.dialog_pane_bg}; color: {theme.tab_highlight}; border-bottom: 2px solid {theme.tab_highlight}; }}"
+        f"QScrollArea, QScrollArea > QWidget {{ background: {theme.dialog_pane_bg}; border: none; }}"
+        f"QScrollArea > QWidget > QWidget {{ background: {theme.dialog_pane_bg}; border: none; }}"
+        f"QScrollBar:vertical {{ background: {theme.dialog_pane_bg}; width: 8px; border-radius: 4px; margin: 0; }}"
+        "QScrollBar::handle:vertical {{ background: #334155; min-height: 20px; border-radius: 4px; }}"
+        f"QScrollBar::handle:vertical:hover {{ background: {theme.accent_color}; }}"
+        "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0px; }}"
+        "QCheckBox {{ color: #f8fafc; spacing: 8px; font-size: 13px; }}"
+        "QCheckBox::indicator {{ width: 18px; height: 18px; border-radius: 4px; border: 1.5px solid #475569; background: #1e293b; }}"
+        "QCheckBox::indicator:checked {{ background: #22c55e; border-color: #22c55e; image: none; }}"
+    )
+
+
 @dataclass
 class CharacterConfig:
     character_name: str = "Lumi"
@@ -338,6 +605,7 @@ class CharacterConfig:
     alarm_sound_theme: str = "digital_beep"  # "digital_beep", "omnitrix_pulse", "gentle_chime", "retro_8bit"
     custom_alarm_sound_path: str = ""
     voice_alarm_enabled: bool = True
+    ui_theme: str = "deep_slate"
 
     @classmethod
     def load(cls, path: Path = CONFIG_FILE) -> "CharacterConfig":
@@ -357,6 +625,10 @@ class CharacterConfig:
             cfg.character_id = clean_cid
             if getattr(cfg, "alarm_sound_theme", "") not in ("digital_beep", "omnitrix_pulse", "gentle_chime", "retro_8bit"):
                 cfg.alarm_sound_theme = "digital_beep"
+            clean_theme = str(getattr(cfg, "ui_theme", "") or "deep_slate").strip().lower()
+            if clean_theme not in UI_THEMES:
+                clean_theme = "deep_slate"
+            cfg.ui_theme = clean_theme
             try:
                 cfg.wake_resume_cooldown_minutes = max(1, min(1440, int(cfg.wake_resume_cooldown_minutes)))
             except (TypeError, ValueError):
@@ -1990,75 +2262,10 @@ class ChatPopupWindow(QtWidgets.QWidget):
         outer = QtWidgets.QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
 
+        theme = get_ui_theme(getattr(self._config, "ui_theme", "deep_slate"))
         self._frame = QtWidgets.QFrame()
         self._frame.setObjectName("popupFrame")
-        self._frame.setStyleSheet(
-            """
-            #popupFrame {
-                background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 rgba(15, 23, 42, 0.96), stop:1 rgba(10, 15, 30, 0.98));
-                border: 1.5px solid rgba(56, 189, 248, 0.35);
-                border-radius: 18px;
-            }
-            QLabel { color: #e2e8f0; }
-            QPushButton {
-                background: rgba(30, 41, 59, 0.75);
-                color: #e2e8f0;
-                border: 1px solid rgba(51, 65, 85, 0.8);
-                border-radius: 8px;
-                padding: 4px 8px;
-                font-size: 11px;
-                font-weight: 600;
-            }
-            QPushButton:hover { background: rgba(51, 65, 85, 0.95); border-color: #38bdf8; }
-            QPushButton#sendBtn {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #2563eb, stop:1 #38bdf8);
-                border: none;
-                color: #ffffff;
-                padding: 7px 16px;
-                border-radius: 9px;
-                font-size: 12px;
-                font-weight: bold;
-            }
-            QPushButton#sendBtn:hover { background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #1d4ed8, stop:1 #0284c7); }
-            QPushButton#stopBtn {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #dc2626, stop:1 #f87171);
-                border: none;
-                color: #ffffff;
-                padding: 7px 16px;
-                border-radius: 9px;
-                font-size: 12px;
-                font-weight: bold;
-            }
-            QPlainTextEdit {
-                background: rgba(11, 17, 32, 0.85);
-                color: #f8fafc;
-                border: 1.5px solid #334155;
-                border-radius: 12px;
-                padding: 10px 12px;
-                font-size: 13px;
-            }
-            QPlainTextEdit:focus {
-                border: 1.5px solid #38bdf8;
-            }
-            QScrollArea { border: none; background: transparent; }
-            QScrollBar:vertical {
-                background: transparent;
-                width: 6px;
-                margin: 0;
-            }
-            QScrollBar::handle:vertical {
-                background: rgba(148, 163, 184, 0.35);
-                border-radius: 3px;
-                min-height: 24px;
-            }
-            QScrollBar::handle:vertical:hover {
-                background: rgba(56, 189, 248, 0.65);
-            }
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
-                height: 0px;
-            }
-            """
-        )
+        self._frame.setStyleSheet(get_chat_frame_qss(theme))
         outer.addWidget(self._frame)
 
         root = QtWidgets.QVBoxLayout(self._frame)
@@ -2326,28 +2533,31 @@ class ChatPopupWindow(QtWidgets.QWidget):
         self.provider_switch_requested.emit(provider, model)
 
     @staticmethod
-    def _make_topic_pill(label: str, prompt: str, on_click, accent: bool = False) -> QtWidgets.QPushButton:
+    def _make_topic_pill(label: str, prompt: str, on_click, accent: bool = False, theme: Optional[UITheme] = None) -> QtWidgets.QPushButton:
         btn = QtWidgets.QPushButton(label)
+        t = theme or get_ui_theme("deep_slate")
         if accent:
             btn.setStyleSheet(
-                "QPushButton{background:#1d4ed8;color:#f8fafc;border:1px solid #3b82f6;"
+                f"QPushButton{{background:{t.primary_gradient_start};color:#f8fafc;border:1px solid {t.accent_color};"
                 "border-radius:12px;padding:3px 10px;font-size:11px;font-weight:700;}"
-                "QPushButton:hover{background:#2563eb;color:#ffffff;}"
+                f"QPushButton:hover{{background:{t.accent_hover};color:#ffffff;}}"
             )
         else:
             btn.setStyleSheet(
-                "QPushButton{background:#162033;color:#93c5fd;border:1px solid #1e3a8a;"
-                "border-radius:12px;padding:3px 9px;font-size:11px;}"
-                "QPushButton:hover{background:#1e3a8a;color:#fff;}"
+                f"QPushButton{{background:#162033;color:{t.accent_color};border:1px solid {t.card_border};"
+                "border-radius:12px;padding:3px 9px;font-size:11px;font-weight:600;}"
+                f"QPushButton:hover{{background:rgba(51,65,85,0.9);color:#ffffff;border-color:{t.accent_color};}}"
             )
         btn.clicked.connect(lambda _=False, p=prompt: on_click(p))
         return btn
 
     def _rebuild_topic_chips(self, config: CharacterConfig, force: bool = False) -> None:
         greeting_data = build_wake_greeting_data(config)
+        theme = get_ui_theme(getattr(config, "ui_theme", "deep_slate"))
         sig = (
             tuple((t["label"], t["prompt"]) for t in greeting_data["topics"]),
             bool(config.enable_system_tools),
+            theme.id,
         )
         if not force and getattr(self, "_chips_signature", None) == sig and self._files_chip is not None:
             self._files_chip.setVisible(bool(config.enable_system_tools))
@@ -2358,12 +2568,13 @@ class ChatPopupWindow(QtWidgets.QWidget):
         self._tasks_chip = None
         for topic in greeting_data["topics"]:
             self._chips_layout.addWidget(
-                self._make_topic_pill(topic["label"], topic["prompt"], self._submit_text)
+                self._make_topic_pill(topic["label"], topic["prompt"], self._submit_text, theme=theme)
             )
         files_btn = self._make_topic_pill(
             "Files",
             "List all my PC drives and allowed folders.",
             self._submit_text,
+            theme=theme,
         )
         files_btn.setVisible(bool(config.enable_system_tools))
         self._files_chip = files_btn
@@ -2371,9 +2582,9 @@ class ChatPopupWindow(QtWidgets.QWidget):
 
         tasks_btn = QtWidgets.QPushButton("📋 Tasks")
         tasks_btn.setStyleSheet(
-            "QPushButton{background:rgba(30,41,59,0.85);color:#38bdf8;border:1px solid rgba(56,189,248,0.4);"
+            f"QPushButton{{background:rgba(30,41,59,0.85);color:{theme.accent_color};border:1px solid {theme.card_border};"
             "border-radius:12px;padding:3px 10px;font-size:11px;font-weight:700;}"
-            "QPushButton:hover{background:rgba(56,189,248,0.25);color:#ffffff;border-color:#38bdf8;}"
+            f"QPushButton:hover{{background:rgba(51,65,85,0.95);color:#ffffff;border-color:{theme.accent_color};}}"
         )
         tasks_btn.clicked.connect(self.tasks_requested.emit)
         self._tasks_chip = tasks_btn
@@ -2400,6 +2611,14 @@ class ChatPopupWindow(QtWidgets.QWidget):
 
     def apply_config(self, config: CharacterConfig) -> None:
         self._config = config
+        theme = get_ui_theme(getattr(config, "ui_theme", "deep_slate"))
+        self._frame.setStyleSheet(get_chat_frame_qss(theme))
+        if hasattr(self, "_attachment_bar") and self._attachment_bar is not None:
+            self._attachment_bar.setStyleSheet(
+                f"QWidget {{ background: rgba(30, 41, 59, 0.95); border: 1px solid {theme.accent_color}; border-radius: 6px; padding: 2px 6px; }}"
+            )
+        if hasattr(self, "_att_thumb_lbl") and self._att_thumb_lbl is not None:
+            self._att_thumb_lbl.setStyleSheet(f"color: {theme.accent_color}; font-size: 11px; font-weight: bold; background: transparent; border: none;")
         self._name_lbl.setText(config.character_name or "Lumi")
         model = config.model_name or chatbot.default_model_for_provider(config.provider)
         web_badge = "" if config.use_tools else " · Web/API OFF"
@@ -2433,9 +2652,10 @@ class ChatPopupWindow(QtWidgets.QWidget):
     def set_streaming(self, active: bool) -> None:
         self._send_btn.setVisible(not active)
         self._stop_btn.setVisible(active)
+        theme = get_ui_theme(getattr(self._config, "ui_theme", "deep_slate"))
         if hasattr(self, "_status_dot"):
             if active:
-                self._status_dot.setStyleSheet("border-radius:4px;background:#38bdf8;")
+                self._status_dot.setStyleSheet(f"border-radius:4px;background:{theme.accent_color};")
             else:
                 needs_key = chatbot.requires_api_key(self._config.provider) and not chatbot.resolve_api_key(self._config.provider)
                 if needs_key:
@@ -2621,11 +2841,12 @@ class ChatPopupWindow(QtWidgets.QWidget):
         lbl.setWordWrap(True)
         lbl.setMaximumWidth(max(260, int(self.width() * 0.78)))
         lbl.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
+        theme = get_ui_theme(getattr(self._config, "ui_theme", "deep_slate"))
         lbl.setStyleSheet(
-            "background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #2563eb, stop:1 #1d4ed8);"
+            f"background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 {theme.user_bubble_start}, stop:1 {theme.user_bubble_end});"
             "color: #ffffff; padding: 9px 13px; border-radius: 14px;"
             "border-bottom-right-radius: 3px; font-size: 13px;"
-            "border: 1px solid rgba(255, 255, 255, 0.12);"
+            f"border: 1px solid {theme.user_bubble_border};"
         )
         if hasattr(self, "_bubble_wheel_filter") and self._bubble_wheel_filter:
             wrap.installEventFilter(self._bubble_wheel_filter)
@@ -2834,30 +3055,7 @@ class ChatPopupWindow(QtWidgets.QWidget):
 # CUSTOMIZE CHARACTER & PERSONA DIALOG
 # ============================================================
 
-_DARK_DIALOG_QSS = (
-    "QDialog{background:#0f172a;color:#e2e8f0;font-size:12px;}"
-    "QLabel,QCheckBox{color:#cbd5e1;font-weight:600;}"
-    "QCheckBox{spacing:8px;}"
-    "QGroupBox{background:#111c33;border:1px solid #293548;border-radius:10px;"
-    "margin-top:10px;padding:12px 12px 8px 12px;font-weight:700;color:#93c5fd;}"
-    "QGroupBox::title{subcontrol-origin:margin;left:12px;padding:0 6px;}"
-    "QTabWidget::pane{border:1px solid #293548;border-radius:10px;background:#0f172a;top:-1px;}"
-    "QTabBar::tab{background:#1e293b;color:#94a3b8;border:1px solid #293548;"
-    "border-bottom:none;border-top-left-radius:8px;border-top-right-radius:8px;"
-    "padding:7px 14px;margin-right:4px;font-weight:600;}"
-    "QTabBar::tab:selected{background:#2563eb;color:#ffffff;border-color:#2563eb;}"
-    "QTabBar::tab:hover:!selected{background:#293548;color:#e2e8f0;}"
-    "QLineEdit,QComboBox,QPlainTextEdit,QSpinBox,QListWidget{background:#1e293b;color:#f8fafc;"
-    "border:1px solid #334155;border-radius:7px;padding:4px 8px;}"
-    "QListWidget::item{padding:5px 6px;border-radius:5px;}"
-    "QListWidget::item:selected{background:#1d4ed8;color:#ffffff;}"
-    "QLineEdit:focus,QComboBox:focus,QPlainTextEdit:focus,QSpinBox:focus,QListWidget:focus{border-color:#38bdf8;}"
-    "QPushButton{background:#1e293b;color:#e2e8f0;border:1px solid #334155;"
-    "border-radius:7px;padding:5px 12px;font-weight:600;}"
-    "QPushButton:hover{background:#334155;}"
-    "QPushButton#primaryBtn{background:#2563eb;color:#ffffff;border-color:#2563eb;}"
-    "QPushButton#primaryBtn:hover{background:#1d4ed8;}"
-)
+_DARK_DIALOG_QSS = get_dialog_qss(get_ui_theme("deep_slate"))
 
 
 _BUILTIN_API_FIELD_TABS: Tuple[Tuple[str, Tuple[Tuple[str, str, bool, str], ...]], ...] = (
@@ -3313,18 +3511,20 @@ class AvatarGalleryDialog(QtWidgets.QDialog):
         self,
         parent: Optional[QtWidgets.QWidget] = None,
         current_character_id: str = "lumi",
+        ui_theme: str = "deep_slate",
     ):
         super().__init__(parent)
         self.setWindowTitle("Choose Animated Character Avatar")
         self.setMinimumSize(720, 520)
         self.resize(760, 560)
+        self._theme = get_ui_theme(ui_theme)
         self.setStyleSheet(
-            "QDialog{background:#0b1120;color:#f8fafc;}"
-            "QLabel{color:#f8fafc;}"
-            "QPushButton{background:#1e293b;color:#f8fafc;border:1px solid #334155;border-radius:6px;padding:6px 14px;font-size:12px;}"
-            "QPushButton:hover{background:#334155;border-color:#38bdf8;}"
-            "QPushButton:checked{background:#2563eb;border-color:#60a5fa;font-weight:bold;}"
-            "QScrollArea{background:transparent;border:none;}"
+            f"QDialog{{background:{self._theme.dialog_bg};color:#f8fafc;}}"
+            "QLabel{{color:#f8fafc;}}"
+            "QPushButton{{background:#1e293b;color:#f8fafc;border:1px solid #334155;border-radius:6px;padding:6px 14px;font-size:12px;}}"
+            f"QPushButton:hover{{background:#334155;border-color:{self._theme.accent_color};}}"
+            f"QPushButton:checked{{background:{self._theme.primary_gradient_start};border-color:{self._theme.accent_color};font-weight:bold;}}"
+            "QScrollArea{{background:transparent;border:none;}}"
         )
 
         self._selected_id = current_character_id if current_character_id in CHARACTER_PRESETS else "lumi"
@@ -3507,9 +3707,10 @@ class SettingsDialog(QtWidgets.QDialog):
         target_w = min(720, max(640, avail.width() - 80))
         target_h = min(650, max(540, avail.height() - 40))
         self.resize(target_w, target_h)
-        self.setStyleSheet(_DARK_DIALOG_QSS)
 
         self._config = CharacterConfig(**asdict(config))
+        self._theme = get_ui_theme(getattr(self._config, "ui_theme", "deep_slate"))
+        self.setStyleSheet(get_dialog_qss(self._theme))
         self._selected_character_id = self._config.character_id
         self._topics_draft: List[Dict[str, Any]] = _resolved_topics(copy.deepcopy(self._config.custom_topics))
         layout = QtWidgets.QVBoxLayout(self)
@@ -3623,6 +3824,22 @@ class SettingsDialog(QtWidgets.QDialog):
         size_row.addWidget(self._size_slider, 1)
         size_row.addWidget(self._size_spin)
         look_form.addRow("Character Size:", size_row)
+
+        theme_row = QtWidgets.QHBoxLayout()
+        theme_row.setSpacing(8)
+        self._theme_combo = QtWidgets.QComboBox()
+        self._theme_combo.setView(QtWidgets.QListView())
+        for tid, tobj in UI_THEMES.items():
+            self._theme_combo.addItem(tobj.name, tid)
+        cur_theme = getattr(self._config, "ui_theme", "deep_slate")
+        idx = self._theme_combo.findData(cur_theme)
+        if idx >= 0:
+            self._theme_combo.setCurrentIndex(idx)
+        else:
+            self._theme_combo.setCurrentIndex(0)
+        self._theme_combo.currentIndexChanged.connect(self._on_theme_changed)
+        theme_row.addWidget(self._theme_combo, 1)
+        look_form.addRow("UI Theme Accent:", theme_row)
 
         self._initial_startup = is_startup_enabled()
         self._startup_chk = QtWidgets.QCheckBox("Launch automatically when Windows starts")
@@ -4159,6 +4376,11 @@ class SettingsDialog(QtWidgets.QDialog):
         if label in PERSONA_PRESETS:
             self._persona_edit.setPlainText(PERSONA_PRESETS[label])
 
+    def _on_theme_changed(self) -> None:
+        tid = self._theme_combo.currentData() if hasattr(self, "_theme_combo") else "deep_slate"
+        self._theme = get_ui_theme(tid)
+        self.setStyleSheet(get_dialog_qss(self._theme))
+
     def _refresh_provider_hint(self, provider: str) -> None:
         if provider == "ollama":
             installed = chatbot.list_ollama_models(timeout=0.35)
@@ -4236,7 +4458,8 @@ class SettingsDialog(QtWidgets.QDialog):
         self._refresh_provider_hint(provider)
 
     def _open_avatar_gallery(self) -> None:
-        dlg = AvatarGalleryDialog(self, current_character_id=self._selected_character_id)
+        cur_theme = self._theme_combo.currentData() if hasattr(self, "_theme_combo") else getattr(self._config, "ui_theme", "deep_slate")
+        dlg = AvatarGalleryDialog(self, current_character_id=self._selected_character_id, ui_theme=cur_theme)
         if dlg.exec() == QtWidgets.QDialog.DialogCode.Accepted:
             preset, sync_persona = dlg.get_selected_preset()
             self._selected_character_id = preset.id
@@ -4328,6 +4551,8 @@ class SettingsDialog(QtWidgets.QDialog):
         self._config.alarm_sound_theme = self._sound_theme_combo.currentData() or "digital_beep"
         self._config.custom_alarm_sound_path = self._custom_wav_edit.text().strip()
         self._config.voice_alarm_enabled = self._voice_alarm_chk.isChecked()
+        if hasattr(self, "_theme_combo"):
+            self._config.ui_theme = self._theme_combo.currentData() or "deep_slate"
         return self._config
 
     def _browse_custom_wav(self) -> None:
@@ -4547,36 +4772,10 @@ class TasksDialog(QtWidgets.QDialog):
         self.setWindowTitle("Tasks, Alarms & Reminders")
         self.resize(680, 660)
         self.setMinimumSize(580, 540)
-        self.setStyleSheet(
-            "QDialog { background: #0b1120; color: #f8fafc; }"
-            "QLabel { color: #f8fafc; }"
-            "QLineEdit { background: #1e293b; color: #f8fafc; border: 1px solid #334155; border-radius: 6px; padding: 6px 10px; font-size: 13px; min-height: 22px; }"
-            "QLineEdit:focus { border-color: #38bdf8; }"
-            "QComboBox { background: #1e293b; color: #f8fafc; border: 1px solid #334155; border-radius: 6px; padding: 5px 10px; font-size: 12px; min-height: 22px; }"
-            "QComboBox:hover { border-color: #38bdf8; }"
-            "QComboBox QAbstractItemView { background-color: #1e293b; color: #f8fafc; selection-background-color: #0284c7; selection-color: #ffffff; border: 1px solid #475569; border-radius: 6px; padding: 4px; outline: none; }"
-            "QComboBox QAbstractItemView::item { color: #f8fafc; padding: 6px 12px; min-height: 24px; border-radius: 4px; }"
-            "QComboBox QAbstractItemView::item:hover { background-color: #334155; color: #38bdf8; }"
-            "QComboBox QAbstractItemView::item:selected { background-color: #0284c7; color: #ffffff; }"
-            "QPushButton { background: #1e293b; color: #f8fafc; border: 1px solid #334155; border-radius: 6px; padding: 6px 14px; font-size: 12px; font-weight: 500; }"
-            "QPushButton:hover { background: #334155; border-color: #38bdf8; }"
-            "QPushButton:checked { background: #0284c7; color: #ffffff; font-weight: bold; border-color: #38bdf8; }"
-            "QTabWidget, QTabWidget > QWidget, QTabBar { background: #0b1120; }"
-            "QTabWidget::pane { border: 1px solid #1e293b; background: #0f172a; border-radius: 8px; }"
-            "QTabBar::tab { background: #1e293b; color: #94a3b8; padding: 8px 20px; border-top-left-radius: 6px; border-top-right-radius: 6px; font-weight: bold; margin-right: 4px; font-size: 13px; }"
-            "QTabBar::tab:selected { background: #0f172a; color: #38bdf8; border-bottom: 2px solid #38bdf8; }"
-            "QScrollArea, QScrollArea > QWidget { background: #0f172a; border: none; }"
-            "QScrollArea > QWidget > QWidget { background: #0f172a; border: none; }"
-            "QScrollBar:vertical { background: #0f172a; width: 8px; border-radius: 4px; margin: 0; }"
-            "QScrollBar::handle:vertical { background: #334155; min-height: 20px; border-radius: 4px; }"
-            "QScrollBar::handle:vertical:hover { background: #38bdf8; }"
-            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0px; }"
-            "QCheckBox { color: #f8fafc; spacing: 8px; font-size: 13px; }"
-            "QCheckBox::indicator { width: 18px; height: 18px; border-radius: 4px; border: 1.5px solid #475569; background: #1e293b; }"
-            "QCheckBox::indicator:checked { background: #22c55e; border-color: #22c55e; image: none; }"
-        )
-
         self._config = config
+        self._theme = get_ui_theme(getattr(config, "ui_theme", "deep_slate"))
+        self.setStyleSheet(get_tasks_dialog_qss(self._theme))
+
         self._on_data_changed = on_data_changed
         self._todo_filter = "pending"
         self._syncing_time = False
@@ -4588,11 +4787,11 @@ class TasksDialog(QtWidgets.QDialog):
         # Header
         hdr = QtWidgets.QHBoxLayout()
         title_box = QtWidgets.QVBoxLayout()
-        title = QtWidgets.QLabel("📋 Tasks & Schedule")
-        title.setStyleSheet("font-size: 17px; font-weight: bold; color: #38bdf8;")
+        self._title_lbl = QtWidgets.QLabel("📋 Tasks & Schedule")
+        self._title_lbl.setStyleSheet(f"font-size: 17px; font-weight: bold; color: {self._theme.accent_color};")
         sub = QtWidgets.QLabel("Your persistent personal organizer & alarm engine")
         sub.setStyleSheet("font-size: 12px; color: #94a3b8;")
-        title_box.addWidget(title)
+        title_box.addWidget(self._title_lbl)
         title_box.addWidget(sub)
         hdr.addLayout(title_box)
         hdr.addStretch(1)
@@ -4721,15 +4920,15 @@ class TasksDialog(QtWidgets.QDialog):
         self._new_todo_cat.addItems(["General", "Work", "Personal", "Study", "Shopping"])
         add_layout.addWidget(self._new_todo_cat)
 
-        add_btn = QtWidgets.QPushButton("+ Add Task")
-        add_btn.setFixedHeight(36)
-        add_btn.setMinimumWidth(90)
-        add_btn.setStyleSheet(
-            "QPushButton{background:#0284c7;color:#fff;font-weight:bold;border:none;border-radius:6px;padding:6px 14px;font-size:12px;}"
-            "QPushButton:hover{background:#0369a1;}"
+        self._add_todo_btn = QtWidgets.QPushButton("+ Add Task")
+        self._add_todo_btn.setFixedHeight(36)
+        self._add_todo_btn.setMinimumWidth(90)
+        self._add_todo_btn.setStyleSheet(
+            f"QPushButton{{background:{self._theme.accent_hover};color:#fff;font-weight:bold;border:none;border-radius:6px;padding:6px 14px;font-size:12px;}}"
+            f"QPushButton:hover{{background:{self._theme.accent_color};}}"
         )
-        add_btn.clicked.connect(self._on_add_todo)
-        add_layout.addWidget(add_btn)
+        self._add_todo_btn.clicked.connect(self._on_add_todo)
+        add_layout.addWidget(self._add_todo_btn)
         layout.addWidget(add_box)
 
         self._tabs.addTab(tab, "📝 To-Do List")
@@ -4743,9 +4942,9 @@ class TasksDialog(QtWidgets.QDialog):
 
         # Section 1: Alarms Header
         alm_hdr = QtWidgets.QHBoxLayout()
-        alm_title = QtWidgets.QLabel("⏰ Active Alarms")
-        alm_title.setStyleSheet("font-size: 14px; font-weight: bold; color: #38bdf8;")
-        alm_hdr.addWidget(alm_title)
+        self._alm_title = QtWidgets.QLabel("⏰ Active Alarms")
+        self._alm_title.setStyleSheet(f"font-size: 14px; font-weight: bold; color: {self._theme.accent_color};")
+        alm_hdr.addWidget(self._alm_title)
         alm_hdr.addStretch(1)
         layout.addLayout(alm_hdr)
 
@@ -4769,9 +4968,9 @@ class TasksDialog(QtWidgets.QDialog):
         self._alm_time_input.setToolTip("Type exact time (e.g. 07:30 or 7:00 AM) or slide the controls below")
         self._alm_time_input.setFixedWidth(115)
         self._alm_time_input.setStyleSheet(
-            "QLineEdit { background: #1e293b; color: #38bdf8; font-size: 16px; font-weight: bold; "
-            "border: 1.5px solid #0284c7; border-radius: 6px; padding: 4px 8px; }"
-            "QLineEdit:focus { border-color: #38bdf8; }"
+            f"QLineEdit {{ background: #1e293b; color: {self._theme.accent_color}; font-size: 16px; font-weight: bold; "
+            f"border: 1.5px solid {self._theme.accent_hover}; border-radius: 6px; padding: 4px 8px; }}"
+            f"QLineEdit:focus {{ border-color: {self._theme.accent_color}; }}"
         )
         self._alm_time_input.textChanged.connect(self._on_alm_time_typed)
         row1.addWidget(self._alm_time_input)
@@ -4792,15 +4991,15 @@ class TasksDialog(QtWidgets.QDialog):
         self._alm_repeat_combo.setFixedWidth(155)
         row1.addWidget(self._alm_repeat_combo)
 
-        alm_btn = QtWidgets.QPushButton("+ Set Alarm")
-        alm_btn.setFixedHeight(36)
-        alm_btn.setMinimumWidth(105)
-        alm_btn.setStyleSheet(
-            "QPushButton{background:#0284c7;color:#fff;font-weight:bold;border:none;border-radius:6px;padding:7px 14px;font-size:12px;}"
-            "QPushButton:hover{background:#0369a1;}"
+        self._add_alm_btn = QtWidgets.QPushButton("+ Set Alarm")
+        self._add_alm_btn.setFixedHeight(36)
+        self._add_alm_btn.setMinimumWidth(105)
+        self._add_alm_btn.setStyleSheet(
+            f"QPushButton{{background:{self._theme.accent_hover};color:#fff;font-weight:bold;border:none;border-radius:6px;padding:7px 14px;font-size:12px;}}"
+            f"QPushButton:hover{{background:{self._theme.accent_color};}}"
         )
-        alm_btn.clicked.connect(self._on_add_alarm)
-        row1.addWidget(alm_btn)
+        self._add_alm_btn.clicked.connect(self._on_add_alarm)
+        row1.addWidget(self._add_alm_btn)
         alm_card_layout.addLayout(row1)
 
         # Row 2: Sliders section (Hour slider and Minute slider with real-time sync)
@@ -4812,16 +5011,16 @@ class TasksDialog(QtWidgets.QDialog):
 
         slider_style = (
             "QSlider::groove:horizontal { height: 6px; background: #1e293b; border-radius: 3px; }"
-            "QSlider::sub-page:horizontal { background: #0284c7; border-radius: 3px; }"
-            "QSlider::handle:horizontal { background: #38bdf8; border: 2px solid #ffffff; width: 16px; margin: -5px 0; border-radius: 8px; }"
-            "QSlider::handle:horizontal:hover { background: #ffffff; border-color: #38bdf8; }"
+            f"QSlider::sub-page:horizontal {{ background: {self._theme.accent_hover}; border-radius: 3px; }}"
+            f"QSlider::handle:horizontal {{ background: {self._theme.accent_color}; border: 2px solid #ffffff; width: 16px; margin: -5px 0; border-radius: 8px; }}"
+            f"QSlider::handle:horizontal:hover {{ background: #ffffff; border-color: {self._theme.accent_color}; }}"
         )
 
         # Hour slider row
         h_row = QtWidgets.QHBoxLayout()
         self._hour_slider_lbl = QtWidgets.QLabel("Hour: 07 AM")
         self._hour_slider_lbl.setFixedWidth(95)
-        self._hour_slider_lbl.setStyleSheet("font-size: 12px; font-weight: bold; color: #38bdf8;")
+        self._hour_slider_lbl.setStyleSheet(f"font-size: 12px; font-weight: bold; color: {self._theme.accent_color};")
         h_row.addWidget(self._hour_slider_lbl)
 
         self._hour_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
@@ -4836,7 +5035,7 @@ class TasksDialog(QtWidgets.QDialog):
         m_row = QtWidgets.QHBoxLayout()
         self._min_slider_lbl = QtWidgets.QLabel("Min: 30")
         self._min_slider_lbl.setFixedWidth(95)
-        self._min_slider_lbl.setStyleSheet("font-size: 12px; font-weight: bold; color: #38bdf8;")
+        self._min_slider_lbl.setStyleSheet(f"font-size: 12px; font-weight: bold; color: {self._theme.accent_color};")
         m_row.addWidget(self._min_slider_lbl)
 
         self._min_slider = QtWidgets.QSlider(QtCore.Qt.Orientation.Horizontal)
@@ -5019,6 +5218,48 @@ class TasksDialog(QtWidgets.QDialog):
         self._f_all_btn.setChecked(mode == "all")
         self.refresh_todos()
 
+    def apply_config(self, config: Optional[CharacterConfig] = None) -> None:
+        """Apply updated config and dynamic UI theme colors across dialog."""
+        if config is not None:
+            self._config = config
+        self._theme = get_ui_theme(getattr(self._config, "ui_theme", "deep_slate"))
+        self.setStyleSheet(get_tasks_dialog_qss(self._theme))
+        if hasattr(self, "_title_lbl"):
+            self._title_lbl.setStyleSheet(f"font-size: 17px; font-weight: bold; color: {self._theme.accent_color};")
+        if hasattr(self, "_alm_title"):
+            self._alm_title.setStyleSheet(f"font-size: 14px; font-weight: bold; color: {self._theme.accent_color};")
+        if hasattr(self, "_add_todo_btn"):
+            self._add_todo_btn.setStyleSheet(
+                f"QPushButton{{background:{self._theme.accent_hover};color:#fff;font-weight:bold;border:none;border-radius:6px;padding:6px 14px;font-size:12px;}}"
+                f"QPushButton:hover{{background:{self._theme.accent_color};}}"
+            )
+        if hasattr(self, "_add_alm_btn"):
+            self._add_alm_btn.setStyleSheet(
+                f"QPushButton{{background:{self._theme.accent_hover};color:#fff;font-weight:bold;border:none;border-radius:6px;padding:7px 14px;font-size:12px;}}"
+                f"QPushButton:hover{{background:{self._theme.accent_color};}}"
+            )
+        if hasattr(self, "_alm_time_input"):
+            self._alm_time_input.setStyleSheet(
+                f"QLineEdit {{ background: #1e293b; color: {self._theme.accent_color}; font-size: 16px; font-weight: bold; "
+                f"border: 1.5px solid {self._theme.accent_hover}; border-radius: 6px; padding: 4px 8px; }}"
+                f"QLineEdit:focus {{ border-color: {self._theme.accent_color}; }}"
+            )
+        if hasattr(self, "_hour_slider_lbl"):
+            self._hour_slider_lbl.setStyleSheet(f"font-size: 12px; font-weight: bold; color: {self._theme.accent_color};")
+        if hasattr(self, "_min_slider_lbl"):
+            self._min_slider_lbl.setStyleSheet(f"font-size: 12px; font-weight: bold; color: {self._theme.accent_color};")
+        slider_style = (
+            "QSlider::groove:horizontal { height: 6px; background: #1e293b; border-radius: 3px; }"
+            f"QSlider::sub-page:horizontal {{ background: {self._theme.accent_hover}; border-radius: 3px; }}"
+            f"QSlider::handle:horizontal {{ background: {self._theme.accent_color}; border: 2px solid #ffffff; width: 16px; margin: -5px 0; border-radius: 8px; }}"
+            f"QSlider::handle:horizontal:hover {{ background: #ffffff; border-color: {self._theme.accent_color}; }}"
+        )
+        if hasattr(self, "_hour_slider"):
+            self._hour_slider.setStyleSheet(slider_style)
+        if hasattr(self, "_min_slider"):
+            self._min_slider.setStyleSheet(slider_style)
+        self.refresh_data()
+
     def refresh_data(self) -> None:
         self.refresh_todos()
         self.refresh_alarms()
@@ -5136,7 +5377,8 @@ class TasksDialog(QtWidgets.QDialog):
 
             time_lbl = QtWidgets.QLabel(display_time)
             time_lbl.setFixedWidth(80)
-            time_lbl.setStyleSheet(f"font-size:15px;font-weight:bold;{'color:#38bdf8;' if alm.enabled else 'color:#64748b;'}")
+            accent = self._theme.accent_color if hasattr(self, "_theme") else "#38bdf8"
+            time_lbl.setStyleSheet(f"font-size:15px;font-weight:bold;{'color:' + accent + ';' if alm.enabled else 'color:#64748b;'}")
             card_layout.addWidget(time_lbl)
 
             lbl = QtWidgets.QLabel(alm.label)
@@ -6162,6 +6404,8 @@ class DesktopCompanionApp(QtCore.QObject):
         self.character.apply_config(new_cfg)
         self.wakeup_bubble.set_character_name(new_cfg.character_name)
         self.popup.apply_config(new_cfg)
+        if getattr(self, "_tasks_dialog", None) is not None:
+            self._tasks_dialog.apply_config(new_cfg)
         self._tray.setIcon(QtGui.QIcon(draw_pet_pixmap(64, new_cfg.sprite_path, new_cfg.character_id)))
         self._tray.setToolTip(f"{new_cfg.character_name} Desktop Companion (Ctrl+Shift+Space)")
         if self.popup.isVisible() and not self.popup.is_pinned():
@@ -6201,6 +6445,7 @@ class DesktopCompanionApp(QtCore.QObject):
         dlg = AvatarGalleryDialog(
             self.popup if self.popup.isVisible() else self.character,
             current_character_id=self._config.character_id,
+            ui_theme=self._config.ui_theme,
         )
         if dlg.exec() == QtWidgets.QDialog.DialogCode.Accepted:
             preset, sync_persona = dlg.get_selected_preset()
