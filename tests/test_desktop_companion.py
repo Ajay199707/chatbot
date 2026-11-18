@@ -1358,4 +1358,44 @@ def test_wake_greeting_and_user_bubbles_dynamic_theme_switch():
         popup.deleteLater()
 
 
+def test_wake_greeting_close_button_and_top_position():
+    _get_qapp()
+    cfg = dc.CharacterConfig(character_id="lumi", ui_theme="auto")
+    popup = dc.ChatPopupWindow(cfg)
+    try:
+        greeting_data = dc.build_wake_greeting_data(cfg)
+        popup.show_wake_greeting(greeting_data)
+
+        # 1. Wake card must be at index 0 (top of layout)
+        assert popup._wake_card is not None
+        assert popup._msg_layout.indexOf(popup._wake_card) == 0
+
+        # 2. Close button exists inside wake card
+        close_btn = popup._wake_card.findChild(QtWidgets.QPushButton, "wakeCloseBtn")
+        assert close_btn is not None
+        assert close_btn.text() == "×"
+
+        # 3. Add user message and assistant message, wake card must remain at index 0 (top)
+        popup.add_user_message("Show me sports news")
+        assert popup._msg_layout.indexOf(popup._wake_card) == 0
+
+        # 4. Clicking close button dismisses greeting card
+        close_btn.click()
+        assert popup._wake_card is None
+        assert popup._wake_dismissed is True
+
+        # 5. Subsequent apply_config or streaming state updates must NOT restore wake card
+        popup.apply_config(cfg)
+        assert popup._wake_card is None
+
+        # 6. Next start / wake reset re-allows it to appear once
+        popup.reset_wake_dismissed()
+        assert popup._wake_dismissed is False
+        popup.show_wake_greeting(greeting_data)
+        assert popup._wake_card is not None
+        assert popup._msg_layout.indexOf(popup._wake_card) == 0
+    finally:
+        popup.deleteLater()
+
+
 

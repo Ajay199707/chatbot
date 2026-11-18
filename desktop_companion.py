@@ -2296,6 +2296,7 @@ class ChatPopupWindow(QtWidgets.QWidget):
         self._streaming_text = ""
         self._wake_card: Optional[QtWidgets.QFrame] = None
         self._wake_briefing_browser: Optional[QtWidgets.QTextBrowser] = None
+        self._wake_dismissed: bool = False
         self._files_chip: Optional[QtWidgets.QPushButton] = None
         self._user_scrolled_up = False
         self._bubble_wheel_filter = MessageWheelFilter(None, self)
@@ -2690,8 +2691,8 @@ class ChatPopupWindow(QtWidgets.QWidget):
         self._key_banner.setVisible(needs_key)
         if config.provider != "gemini":
             self._quota_banner.setVisible(False)
-        # Dynamically re-render welcome greeting card with new avatar's theme
-        if self._wake_card is not None:
+        # Dynamically re-render welcome greeting card with new avatar's theme (stays at top index 0)
+        if self._wake_card is not None and not getattr(self, "_wake_dismissed", False):
             gdata = getattr(self, "_greeting_data", None) or build_wake_greeting_data(config)
             has_briefing = bool(self._wake_briefing_browser and self._wake_briefing_browser.isVisible())
             self.show_wake_greeting(gdata, include_briefing_placeholder=has_briefing)
@@ -2782,12 +2783,23 @@ class ChatPopupWindow(QtWidgets.QWidget):
             self._wake_card = None
         self._wake_briefing_browser = None
 
+    def dismiss_wake_greeting(self) -> None:
+        """Dismiss the wake greeting card and keep it closed for the current session."""
+        self._wake_dismissed = True
+        self._remove_wake_card()
+
+    def reset_wake_dismissed(self) -> None:
+        """Reset dismissed state so wake greeting can appear on next start / trigger."""
+        self._wake_dismissed = False
+
     def show_wake_greeting(
         self,
         greeting_data: Dict[str, Any],
         include_briefing_placeholder: bool = False,
     ) -> None:
-        """Render or refresh the interactive visual wake-up greeting card without altering LLM history."""
+        """Render or refresh the interactive visual wake-up greeting card at the top of the chat."""
+        if getattr(self, "_wake_dismissed", False) and not include_briefing_placeholder:
+            return
         self._greeting_data = greeting_data
         self._remove_wake_card()
 
@@ -2800,13 +2812,32 @@ class ChatPopupWindow(QtWidgets.QWidget):
             "border-radius:12px;}"
         )
         col = QtWidgets.QVBoxLayout(card)
-        col.setContentsMargins(11, 9, 11, 9)
+        col.setContentsMargins(11, 8, 11, 9)
         col.setSpacing(6)
+
+        hdr_row = QtWidgets.QHBoxLayout()
+        hdr_row.setContentsMargins(0, 0, 0, 0)
+        hdr_row.setSpacing(6)
 
         title_lbl = QtWidgets.QLabel(str(greeting_data.get("headline") or "Hello! How can I assist you?"))
         title_lbl.setWordWrap(True)
         title_lbl.setStyleSheet("color:#f8fafc;font-size:13px;font-weight:700;background:transparent;")
-        col.addWidget(title_lbl)
+        hdr_row.addWidget(title_lbl, 1)
+
+        close_btn = QtWidgets.QPushButton("×")
+        close_btn.setObjectName("wakeCloseBtn")
+        close_btn.setFixedSize(22, 22)
+        close_btn.setToolTip("Dismiss greeting")
+        close_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        close_btn.setStyleSheet(
+            "QPushButton#wakeCloseBtn {"
+            "  background: transparent; color: #94a3b8; border: none; font-size: 16px; font-weight: bold; padding: 0 0 2px 0;"
+            "} "
+            f"QPushButton#wakeCloseBtn:hover {{ color: #ffffff; background: rgba(255, 255, 255, 0.12); border-radius: 11px; }}"
+        )
+        close_btn.clicked.connect(self.dismiss_wake_greeting)
+        hdr_row.addWidget(close_btn)
+        col.addLayout(hdr_row)
 
         sub_lbl = QtWidgets.QLabel(str(greeting_data.get("question") or "Pick a topic or ask anything below:"))
         sub_lbl.setWordWrap(True)
@@ -2857,7 +2888,7 @@ class ChatPopupWindow(QtWidgets.QWidget):
 
         self._wake_card = card
         self._wake_briefing_browser = briefing_browser
-        self._insert_widget(card)
+        self._msg_layout.insertWidget(0, card)
         if hasattr(self, "_wake_briefing_text") and self._wake_briefing_text:
             briefing_browser.setVisible(True)
             briefing_browser.setHtml(markdown_to_qt_html(self._wake_briefing_text))
@@ -2896,6 +2927,7 @@ class ChatPopupWindow(QtWidgets.QWidget):
         self._streaming_bubble = None
         self._streaming_text = ""
         self._quota_banner.setVisible(False)
+        self._wake_dismissed = False
 
     def add_system_note(self, text: str) -> None:
         lbl = QtWidgets.QLabel(text)
@@ -6270,6 +6302,7 @@ class DesktopCompanionApp(QtCore.QObject):
         self._last_wake_monotonic = time.monotonic()
         self.show_character()
         self.character.set_state("happy")
+        self.popup.reset_wake_dismissed()
 
         data = build_wake_greeting_data(cfg, system_resume=system_resume)
         self.character.show_speech_bubble(data["bubble_text"], duration_ms=10000)
@@ -6315,6 +6348,7 @@ class DesktopCompanionApp(QtCore.QObject):
             return
         cfg = override_config or self._config
         if self.popup._wake_briefing_browser is None:
+            self.popup.reset_wake_dismissed()
             self.popup.show_wake_greeting(build_wake_greeting_data(cfg), include_briefing_placeholder=True)
         else:
             self.popup.set_wake_briefing_loading()
