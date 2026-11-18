@@ -1218,6 +1218,7 @@ def test_ui_themes_registry_and_fallback():
         "sakura_pink",
         "electric_purple",
         "sunset_amber",
+        "crimson_red",
     ]
     for tid in expected_themes:
         assert tid in dc.UI_THEMES
@@ -1228,10 +1229,16 @@ def test_ui_themes_registry_and_fallback():
         assert theme.primary_gradient_start.startswith("#")
         assert theme.primary_gradient_end.startswith("#")
 
-    # Fallback checks
-    assert dc.get_ui_theme("invalid_theme_name").id == "deep_slate"
-    assert dc.get_ui_theme(None).id == "deep_slate"
-    assert dc.get_ui_theme("").id == "deep_slate"
+    # Character-based auto-resolution checks
+    assert dc.get_ui_theme("auto", character_id="heatblast").id == "sunset_amber"
+    assert dc.get_ui_theme("auto", character_id="fourarms").id == "crimson_red"
+    assert dc.get_ui_theme("auto", character_id="ben_tennyson").id == "neon_green"
+    assert dc.get_ui_theme("auto", character_id="gwen_mana").id == "electric_purple"
+    assert dc.get_ui_theme("auto", character_id="xlr8").id == "cyberpunk_teal"
+    assert dc.get_ui_theme("auto", character_id="anime_sakura").id == "sakura_pink"
+    assert dc.get_ui_theme("auto", character_id="lumi").id == "deep_slate"
+    assert dc.get_ui_theme(None, character_id="heatblast").id == "sunset_amber"
+    assert dc.get_ui_theme("", character_id="fourarms").id == "crimson_red"
 
 
 def test_ui_theme_qss_generators():
@@ -1260,17 +1267,20 @@ def test_character_config_ui_theme_roundtrip(tmp_path):
     bad_p = tmp_path / "bad_cfg.json"
     bad_p.write_text('{"ui_theme": "neon_rainbow_fantasy"}', encoding="utf-8")
     loaded_bad = dc.CharacterConfig.load(bad_p)
-    assert loaded_bad.ui_theme == "deep_slate"
+    assert loaded_bad.ui_theme == "auto"
 
 
 def test_settings_dialog_ui_theme_selection():
     _get_qapp()
-    cfg = dc.CharacterConfig(ui_theme="sakura_pink")
+    cfg = dc.CharacterConfig(character_id="heatblast", ui_theme="auto")
     dlg = dc.SettingsDialog(cfg)
     try:
         assert hasattr(dlg, "_theme_combo")
-        assert dlg._theme_combo.count() == len(dc.UI_THEMES)
-        assert dlg._theme_combo.currentData() == "sakura_pink"
+        # +1 for "✨ Auto (Match Avatar: Heatblast)" item
+        assert dlg._theme_combo.count() == len(dc.UI_THEMES) + 1
+        assert dlg._theme_combo.currentData() == "auto"
+        # Auto resolves to Heatblast's sunset_amber
+        assert dlg._theme.id == "sunset_amber"
 
         # Change theme to neon_green
         idx = dlg._theme_combo.findData("neon_green")
@@ -1286,27 +1296,26 @@ def test_settings_dialog_ui_theme_selection():
 
 def test_chat_popup_and_tasks_dialog_apply_theme():
     _get_qapp()
-    cfg = dc.CharacterConfig(ui_theme="electric_purple")
+    cfg = dc.CharacterConfig(character_id="heatblast", ui_theme="auto")
     popup = dc.ChatPopupWindow(cfg)
     tasks_dlg = dc.TasksDialog(config=cfg)
     try:
-        theme = dc.get_ui_theme("electric_purple")
-        popup.apply_config(cfg)
-        assert popup._config.ui_theme == "electric_purple"
-
-        tasks_dlg.apply_config(cfg)
-        assert tasks_dlg._theme.id == "electric_purple"
-        assert theme.accent_color in tasks_dlg._title_lbl.styleSheet()
-
-        # Switch to sunset_amber
-        cfg.ui_theme = "sunset_amber"
-        popup.apply_config(cfg)
-        assert popup._config.ui_theme == "sunset_amber"
-
-        tasks_dlg.apply_config(cfg)
         amber_theme = dc.get_ui_theme("sunset_amber")
+        popup.apply_config(cfg)
+        assert popup._config.ui_theme == "auto"
+
+        tasks_dlg.apply_config(cfg)
         assert tasks_dlg._theme.id == "sunset_amber"
         assert amber_theme.accent_color in tasks_dlg._title_lbl.styleSheet()
+
+        # Switch to Four Arms
+        cfg.character_id = "fourarms"
+        cfg.ui_theme = "auto"
+        popup.apply_config(cfg)
+        tasks_dlg.apply_config(cfg)
+        crimson_theme = dc.get_ui_theme("crimson_red")
+        assert tasks_dlg._theme.id == "crimson_red"
+        assert crimson_theme.accent_color in tasks_dlg._title_lbl.styleSheet()
     finally:
         popup.deleteLater()
         tasks_dlg.deleteLater()

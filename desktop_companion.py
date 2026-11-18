@@ -436,12 +436,52 @@ UI_THEMES: Dict[str, UITheme] = {
         dialog_bg="#180d05",
         dialog_pane_bg="#231409",
     ),
+    "crimson_red": UITheme(
+        id="crimson_red",
+        name="Crimson Red",
+        accent_color="#ef4444",
+        accent_hover="#dc2626",
+        accent_active="#f87171",
+        primary_gradient_start="#b91c1c",
+        primary_gradient_end="#ef4444",
+        card_bg="#260e0e",
+        card_border="rgba(239, 68, 68, 0.40)",
+        halo_color="rgba(239, 68, 68, 0.45)",
+        user_bubble_start="#dc2626",
+        user_bubble_end="#991b1b",
+        user_bubble_border="rgba(239, 68, 68, 0.25)",
+        tab_highlight="#ef4444",
+        dialog_bg="#170707",
+        dialog_pane_bg="#220d0d",
+    ),
 }
 
 
-def get_ui_theme(theme_id: Optional[str] = None) -> UITheme:
-    """Return the UITheme instance for theme_id or fall back to 'deep_slate'."""
+CHARACTER_THEME_MAP: Dict[str, str] = {
+    "lumi": "deep_slate",
+    "ben_tennyson": "neon_green",
+    "gwen_classic": "deep_slate",
+    "gwen_mana": "electric_purple",
+    "heatblast": "sunset_amber",
+    "fourarms": "crimson_red",
+    "xlr8": "cyberpunk_teal",
+    "anime_sakura": "sakura_pink",
+    "cyber_aria": "cyberpunk_teal",
+}
+
+
+def get_theme_for_character(character_id: Optional[str]) -> str:
+    """Return the matching UI theme id for a character preset id."""
+    clean_id = str(character_id or "").strip().lower()
+    return CHARACTER_THEME_MAP.get(clean_id, "deep_slate")
+
+
+def get_ui_theme(theme_id: Optional[str] = None, character_id: Optional[str] = None) -> UITheme:
+    """Return the UITheme instance for theme_id or automatically resolve by character_id."""
     clean_id = str(theme_id or "").strip().lower()
+    if not clean_id or clean_id in ("auto", "match_avatar"):
+        target_tid = get_theme_for_character(character_id)
+        return UI_THEMES.get(target_tid, UI_THEMES["deep_slate"])
     return UI_THEMES.get(clean_id, UI_THEMES["deep_slate"])
 
 
@@ -605,7 +645,7 @@ class CharacterConfig:
     alarm_sound_theme: str = "digital_beep"  # "digital_beep", "omnitrix_pulse", "gentle_chime", "retro_8bit"
     custom_alarm_sound_path: str = ""
     voice_alarm_enabled: bool = True
-    ui_theme: str = "deep_slate"
+    ui_theme: str = "auto"
 
     @classmethod
     def load(cls, path: Path = CONFIG_FILE) -> "CharacterConfig":
@@ -625,9 +665,11 @@ class CharacterConfig:
             cfg.character_id = clean_cid
             if getattr(cfg, "alarm_sound_theme", "") not in ("digital_beep", "omnitrix_pulse", "gentle_chime", "retro_8bit"):
                 cfg.alarm_sound_theme = "digital_beep"
-            clean_theme = str(getattr(cfg, "ui_theme", "") or "deep_slate").strip().lower()
-            if clean_theme not in UI_THEMES:
-                clean_theme = "deep_slate"
+            clean_theme = str(getattr(cfg, "ui_theme", "") or "auto").strip().lower()
+            if clean_theme not in UI_THEMES and clean_theme not in ("auto", "match_avatar"):
+                clean_theme = "auto"
+            if clean_theme == "deep_slate" and clean_cid not in ("lumi", "gwen_classic") and raw.get("ui_theme") == "deep_slate":
+                clean_theme = "auto"
             cfg.ui_theme = clean_theme
             try:
                 cfg.wake_resume_cooldown_minutes = max(1, min(1440, int(cfg.wake_resume_cooldown_minutes)))
@@ -2262,7 +2304,7 @@ class ChatPopupWindow(QtWidgets.QWidget):
         outer = QtWidgets.QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
 
-        theme = get_ui_theme(getattr(self._config, "ui_theme", "deep_slate"))
+        theme = get_ui_theme(getattr(self._config, "ui_theme", "auto"), character_id=getattr(self._config, "character_id", "lumi"))
         self._frame = QtWidgets.QFrame()
         self._frame.setObjectName("popupFrame")
         self._frame.setStyleSheet(get_chat_frame_qss(theme))
@@ -2553,7 +2595,7 @@ class ChatPopupWindow(QtWidgets.QWidget):
 
     def _rebuild_topic_chips(self, config: CharacterConfig, force: bool = False) -> None:
         greeting_data = build_wake_greeting_data(config)
-        theme = get_ui_theme(getattr(config, "ui_theme", "deep_slate"))
+        theme = get_ui_theme(getattr(config, "ui_theme", "auto"), character_id=getattr(config, "character_id", "lumi"))
         sig = (
             tuple((t["label"], t["prompt"]) for t in greeting_data["topics"]),
             bool(config.enable_system_tools),
@@ -2611,7 +2653,7 @@ class ChatPopupWindow(QtWidgets.QWidget):
 
     def apply_config(self, config: CharacterConfig) -> None:
         self._config = config
-        theme = get_ui_theme(getattr(config, "ui_theme", "deep_slate"))
+        theme = get_ui_theme(getattr(config, "ui_theme", "auto"), character_id=getattr(config, "character_id", "lumi"))
         self._frame.setStyleSheet(get_chat_frame_qss(theme))
         if hasattr(self, "_attachment_bar") and self._attachment_bar is not None:
             self._attachment_bar.setStyleSheet(
@@ -2652,7 +2694,7 @@ class ChatPopupWindow(QtWidgets.QWidget):
     def set_streaming(self, active: bool) -> None:
         self._send_btn.setVisible(not active)
         self._stop_btn.setVisible(active)
-        theme = get_ui_theme(getattr(self._config, "ui_theme", "deep_slate"))
+        theme = get_ui_theme(getattr(self._config, "ui_theme", "auto"), character_id=getattr(self._config, "character_id", "lumi"))
         if hasattr(self, "_status_dot"):
             if active:
                 self._status_dot.setStyleSheet(f"border-radius:4px;background:{theme.accent_color};")
@@ -2841,7 +2883,7 @@ class ChatPopupWindow(QtWidgets.QWidget):
         lbl.setWordWrap(True)
         lbl.setMaximumWidth(max(260, int(self.width() * 0.78)))
         lbl.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
-        theme = get_ui_theme(getattr(self._config, "ui_theme", "deep_slate"))
+        theme = get_ui_theme(getattr(self._config, "ui_theme", "auto"), character_id=getattr(self._config, "character_id", "lumi"))
         lbl.setStyleSheet(
             f"background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 {theme.user_bubble_start}, stop:1 {theme.user_bubble_end});"
             "color: #ffffff; padding: 9px 13px; border-radius: 14px;"
@@ -3511,13 +3553,13 @@ class AvatarGalleryDialog(QtWidgets.QDialog):
         self,
         parent: Optional[QtWidgets.QWidget] = None,
         current_character_id: str = "lumi",
-        ui_theme: str = "deep_slate",
+        ui_theme: str = "auto",
     ):
         super().__init__(parent)
         self.setWindowTitle("Choose Animated Character Avatar")
         self.setMinimumSize(720, 520)
         self.resize(760, 560)
-        self._theme = get_ui_theme(ui_theme)
+        self._theme = get_ui_theme(ui_theme, character_id=current_character_id)
         self.setStyleSheet(
             f"QDialog{{background:{self._theme.dialog_bg};color:#f8fafc;}}"
             "QLabel{{color:#f8fafc;}}"
@@ -3709,9 +3751,9 @@ class SettingsDialog(QtWidgets.QDialog):
         self.resize(target_w, target_h)
 
         self._config = CharacterConfig(**asdict(config))
-        self._theme = get_ui_theme(getattr(self._config, "ui_theme", "deep_slate"))
-        self.setStyleSheet(get_dialog_qss(self._theme))
         self._selected_character_id = self._config.character_id
+        self._theme = get_ui_theme(getattr(self._config, "ui_theme", "auto"), character_id=self._selected_character_id)
+        self.setStyleSheet(get_dialog_qss(self._theme))
         self._topics_draft: List[Dict[str, Any]] = _resolved_topics(copy.deepcopy(self._config.custom_topics))
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(14, 12, 14, 12)
@@ -3829,9 +3871,11 @@ class SettingsDialog(QtWidgets.QDialog):
         theme_row.setSpacing(8)
         self._theme_combo = QtWidgets.QComboBox()
         self._theme_combo.setView(QtWidgets.QListView())
+        cur_preset = get_character_preset(self._selected_character_id)
+        self._theme_combo.addItem(f"✨ Auto (Match Avatar: {cur_preset.name})", "auto")
         for tid, tobj in UI_THEMES.items():
             self._theme_combo.addItem(tobj.name, tid)
-        cur_theme = getattr(self._config, "ui_theme", "deep_slate")
+        cur_theme = getattr(self._config, "ui_theme", "auto")
         idx = self._theme_combo.findData(cur_theme)
         if idx >= 0:
             self._theme_combo.setCurrentIndex(idx)
@@ -4377,8 +4421,8 @@ class SettingsDialog(QtWidgets.QDialog):
             self._persona_edit.setPlainText(PERSONA_PRESETS[label])
 
     def _on_theme_changed(self) -> None:
-        tid = self._theme_combo.currentData() if hasattr(self, "_theme_combo") else "deep_slate"
-        self._theme = get_ui_theme(tid)
+        tid = self._theme_combo.currentData() if hasattr(self, "_theme_combo") else "auto"
+        self._theme = get_ui_theme(tid, character_id=self._selected_character_id)
         self.setStyleSheet(get_dialog_qss(self._theme))
 
     def _refresh_provider_hint(self, provider: str) -> None:
@@ -4458,7 +4502,7 @@ class SettingsDialog(QtWidgets.QDialog):
         self._refresh_provider_hint(provider)
 
     def _open_avatar_gallery(self) -> None:
-        cur_theme = self._theme_combo.currentData() if hasattr(self, "_theme_combo") else getattr(self._config, "ui_theme", "deep_slate")
+        cur_theme = self._theme_combo.currentData() if hasattr(self, "_theme_combo") else getattr(self._config, "ui_theme", "auto")
         dlg = AvatarGalleryDialog(self, current_character_id=self._selected_character_id, ui_theme=cur_theme)
         if dlg.exec() == QtWidgets.QDialog.DialogCode.Accepted:
             preset, sync_persona = dlg.get_selected_preset()
@@ -4467,6 +4511,8 @@ class SettingsDialog(QtWidgets.QDialog):
             self._sprite_edit.setText("")
             if sync_persona and preset.personality_prompt:
                 self._persona_edit.setPlainText(preset.personality_prompt)
+            if hasattr(self, "_theme_combo"):
+                self._theme_combo.setCurrentIndex(0)
             self._update_char_preset_label()
 
     def _update_char_preset_label(self) -> None:
@@ -4478,6 +4524,10 @@ class SettingsDialog(QtWidgets.QDialog):
             self._current_char_lbl.setText(
                 f"<b><font color='{preset.accent_color}'>{preset.name}</font></b> ({preset.category})"
             )
+        if hasattr(self, "_theme_combo") and self._theme_combo.count() > 0:
+            self._theme_combo.setItemText(0, f"✨ Auto (Match Avatar: {preset.name})")
+            if self._theme_combo.currentData() == "auto":
+                self._on_theme_changed()
 
     def _browse_sprite(self) -> None:
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
@@ -4552,7 +4602,7 @@ class SettingsDialog(QtWidgets.QDialog):
         self._config.custom_alarm_sound_path = self._custom_wav_edit.text().strip()
         self._config.voice_alarm_enabled = self._voice_alarm_chk.isChecked()
         if hasattr(self, "_theme_combo"):
-            self._config.ui_theme = self._theme_combo.currentData() or "deep_slate"
+            self._config.ui_theme = self._theme_combo.currentData() or "auto"
         return self._config
 
     def _browse_custom_wav(self) -> None:
@@ -4773,7 +4823,7 @@ class TasksDialog(QtWidgets.QDialog):
         self.resize(680, 660)
         self.setMinimumSize(580, 540)
         self._config = config
-        self._theme = get_ui_theme(getattr(config, "ui_theme", "deep_slate"))
+        self._theme = get_ui_theme(getattr(config, "ui_theme", "auto"), character_id=getattr(config, "character_id", "lumi"))
         self.setStyleSheet(get_tasks_dialog_qss(self._theme))
 
         self._on_data_changed = on_data_changed
@@ -5222,7 +5272,7 @@ class TasksDialog(QtWidgets.QDialog):
         """Apply updated config and dynamic UI theme colors across dialog."""
         if config is not None:
             self._config = config
-        self._theme = get_ui_theme(getattr(self._config, "ui_theme", "deep_slate"))
+        self._theme = get_ui_theme(getattr(self._config, "ui_theme", "auto"), character_id=getattr(self._config, "character_id", "lumi"))
         self.setStyleSheet(get_tasks_dialog_qss(self._theme))
         if hasattr(self, "_title_lbl"):
             self._title_lbl.setStyleSheet(f"font-size: 17px; font-weight: bold; color: {self._theme.accent_color};")
@@ -6458,6 +6508,7 @@ class DesktopCompanionApp(QtCore.QObject):
         self._config.character_name = preset.name
         if update_persona and preset.personality_prompt:
             self._config.personality_prompt = preset.personality_prompt
+        self._config.ui_theme = "auto"
         self._apply_updated_config(self._config)
         self.character.set_state("happy")
         quote = preset.theme_quote or f"I am {preset.name}!"
