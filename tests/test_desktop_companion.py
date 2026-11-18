@@ -1321,4 +1321,41 @@ def test_chat_popup_and_tasks_dialog_apply_theme():
         tasks_dlg.deleteLater()
 
 
+def test_wake_greeting_and_user_bubbles_dynamic_theme_switch():
+    _get_qapp()
+    cfg = dc.CharacterConfig(character_id="lumi", ui_theme="auto")
+    popup = dc.ChatPopupWindow(cfg)
+    try:
+        greeting_data = dc.build_wake_greeting_data(cfg)
+        popup.show_wake_greeting(greeting_data)
+        popup.add_user_message("hello there")
+
+        assert popup._wake_card is not None
+        slate_theme = dc.get_ui_theme("deep_slate")
+        assert slate_theme.card_border in popup._wake_card.styleSheet()
+
+        # Switch to Four Arms (Crimson Red)
+        cfg.character_id = "fourarms"
+        popup.apply_config(cfg)
+
+        assert popup._wake_card is not None
+        crimson_theme = dc.get_ui_theme("crimson_red")
+        assert crimson_theme.card_border in popup._wake_card.styleSheet()
+        assert crimson_theme.card_bg in popup._wake_card.styleSheet()
+
+        # Check user message bubble dynamic recolor
+        user_lbl = popup.findChild(QtWidgets.QLabel, "userMsgBubble")
+        assert user_lbl is not None
+        assert crimson_theme.user_bubble_start in user_lbl.styleSheet()
+
+        # Switch to Heatblast (Sunset Amber)
+        cfg.character_id = "heatblast"
+        popup.apply_config(cfg)
+        amber_theme = dc.get_ui_theme("sunset_amber")
+        assert amber_theme.card_border in popup._wake_card.styleSheet()
+        assert amber_theme.user_bubble_start in user_lbl.styleSheet()
+    finally:
+        popup.deleteLater()
+
+
 

@@ -602,8 +602,11 @@ def get_tasks_dialog_qss(theme: UITheme) -> str:
         f"QTabWidget::pane {{ border: 1px solid #1e293b; background: {theme.dialog_pane_bg}; border-radius: 8px; }}"
         "QTabBar::tab {{ background: #1e293b; color: #94a3b8; padding: 8px 20px; border-top-left-radius: 6px; border-top-right-radius: 6px; font-weight: bold; margin-right: 4px; font-size: 13px; }}"
         f"QTabBar::tab:selected {{ background: {theme.dialog_pane_bg}; color: {theme.tab_highlight}; border-bottom: 2px solid {theme.tab_highlight}; }}"
-        f"QScrollArea, QScrollArea > QWidget {{ background: {theme.dialog_pane_bg}; border: none; }}"
-        f"QScrollArea > QWidget > QWidget {{ background: {theme.dialog_pane_bg}; border: none; }}"
+        f"QScrollArea, QScrollArea > QWidget, QScrollArea > QWidget > QWidget, "
+        f"QFrame#todoTab, QFrame#alarmsTab, QFrame#remindersTab, QFrame#pomodoroTab, "
+        f"QFrame#todoContainer, QFrame#alarmsContainer, QFrame#remindersContainer {{"
+        f" background: {theme.dialog_pane_bg}; background-color: {theme.dialog_pane_bg}; border: none; "
+        f"}}"
         f"QScrollBar:vertical {{ background: {theme.dialog_pane_bg}; width: 8px; border-radius: 4px; margin: 0; }}"
         "QScrollBar::handle:vertical {{ background: #334155; min-height: 20px; border-radius: 4px; }}"
         f"QScrollBar::handle:vertical:hover {{ background: {theme.accent_color}; }}"
@@ -2687,6 +2690,25 @@ class ChatPopupWindow(QtWidgets.QWidget):
         self._key_banner.setVisible(needs_key)
         if config.provider != "gemini":
             self._quota_banner.setVisible(False)
+        # Dynamically re-render welcome greeting card with new avatar's theme
+        if self._wake_card is not None:
+            gdata = getattr(self, "_greeting_data", None) or build_wake_greeting_data(config)
+            has_briefing = bool(self._wake_briefing_browser and self._wake_briefing_browser.isVisible())
+            self.show_wake_greeting(gdata, include_briefing_placeholder=has_briefing)
+        # Dynamically refresh existing user message bubble styles to match new theme
+        if hasattr(self, "_msg_layout"):
+            for i in range(self._msg_layout.count()):
+                item = self._msg_layout.itemAt(i)
+                w = item.widget() if item else None
+                if w is not None:
+                    user_lbl = w.findChild(QtWidgets.QLabel, "userMsgBubble")
+                    if user_lbl:
+                        user_lbl.setStyleSheet(
+                            f"background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 {theme.user_bubble_start}, stop:1 {theme.user_bubble_end});"
+                            "color: #ffffff; padding: 9px 13px; border-radius: 14px;"
+                            "border-bottom-right-radius: 3px; font-size: 13px;"
+                            f"border: 1px solid {theme.user_bubble_border};"
+                        )
 
     def set_status(self, text: str) -> None:
         self._status_lbl.setText(text)
@@ -2766,12 +2788,15 @@ class ChatPopupWindow(QtWidgets.QWidget):
         include_briefing_placeholder: bool = False,
     ) -> None:
         """Render or refresh the interactive visual wake-up greeting card without altering LLM history."""
+        self._greeting_data = greeting_data
         self._remove_wake_card()
+
+        theme = get_ui_theme(getattr(self._config, "ui_theme", "auto"), character_id=getattr(self._config, "character_id", "lumi"))
 
         card = QtWidgets.QFrame()
         card.setObjectName("wakeGreetingCard")
         card.setStyleSheet(
-            "#wakeGreetingCard{background:#111c33;border:1.5px solid #2563eb;"
+            f"#wakeGreetingCard{{background:{theme.card_bg};border:1.5px solid {theme.card_border};"
             "border-radius:12px;}"
         )
         col = QtWidgets.QVBoxLayout(card)
@@ -2793,7 +2818,7 @@ class ChatPopupWindow(QtWidgets.QWidget):
         pills_flow = FlowLayout(pills_host, margin=0, h_spacing=6, v_spacing=5)
         for topic in greeting_data.get("topics") or []:
             pills_flow.addWidget(
-                self._make_topic_pill(str(topic["label"]), str(topic["prompt"]), self._submit_text)
+                self._make_topic_pill(str(topic["label"]), str(topic["prompt"]), self._submit_text, theme=theme)
             )
         if self._config.enable_system_tools:
             pills_flow.addWidget(
@@ -2801,13 +2826,14 @@ class ChatPopupWindow(QtWidgets.QWidget):
                     "My Drives & Files",
                     "List all my PC drives and summarize my folders.",
                     self._submit_text,
+                    theme=theme,
                 )
             )
         briefing_btn = QtWidgets.QPushButton("Get Live Briefing")
         briefing_btn.setStyleSheet(
-            "QPushButton{background:#0f766e;color:#f0fdfa;border:1px solid #14b8a6;"
+            f"QPushButton{{background:{theme.primary_gradient_start};color:#ffffff;border:1px solid {theme.accent_color};"
             "border-radius:12px;padding:3px 10px;font-size:11px;font-weight:700;}"
-            "QPushButton:hover{background:#0d9488;color:#ffffff;}"
+            f"QPushButton:hover{{background:{theme.accent_hover};color:#ffffff;}}"
         )
         briefing_btn.clicked.connect(self.briefing_requested.emit)
         pills_flow.addWidget(briefing_btn)
@@ -2821,7 +2847,7 @@ class ChatPopupWindow(QtWidgets.QWidget):
         briefing_browser.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
         briefing_browser.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
         briefing_browser.setStyleSheet(
-            "QTextBrowser{background:#0f172a;color:#e2e8f0;border:1px solid #334155;"
+            f"QTextBrowser{{background:{theme.dialog_pane_bg};color:#e2e8f0;border:1px solid {theme.card_border};"
             "border-radius:8px;padding:6px 8px;font-size:12px;}"
         )
         briefing_browser.setVisible(False)
@@ -2832,7 +2858,11 @@ class ChatPopupWindow(QtWidgets.QWidget):
         self._wake_card = card
         self._wake_briefing_browser = briefing_browser
         self._insert_widget(card)
-        if include_briefing_placeholder:
+        if hasattr(self, "_wake_briefing_text") and self._wake_briefing_text:
+            briefing_browser.setVisible(True)
+            briefing_browser.setHtml(markdown_to_qt_html(self._wake_briefing_text))
+            self._sync_browser_height(briefing_browser)
+        elif include_briefing_placeholder:
             self.set_wake_briefing_loading()
 
     def set_wake_briefing_loading(self) -> None:
@@ -2844,6 +2874,7 @@ class ChatPopupWindow(QtWidgets.QWidget):
         self._scroll_to_bottom()
 
     def set_wake_briefing_markdown(self, markdown_text: str) -> None:
+        self._wake_briefing_text = markdown_text
         if self._wake_briefing_browser is None:
             return
         self._wake_briefing_browser.setVisible(True)
@@ -2860,6 +2891,8 @@ class ChatPopupWindow(QtWidgets.QWidget):
                 w.deleteLater()
         self._wake_card = None
         self._wake_briefing_browser = None
+        self._wake_briefing_text = None
+        self._greeting_data = None
         self._streaming_bubble = None
         self._streaming_text = ""
         self._quota_banner.setVisible(False)
@@ -2880,6 +2913,7 @@ class ChatPopupWindow(QtWidgets.QWidget):
         row.setContentsMargins(36, 0, 0, 0)
         row.addStretch(1)
         lbl = QtWidgets.QLabel(text)
+        lbl.setObjectName("userMsgBubble")
         lbl.setWordWrap(True)
         lbl.setMaximumWidth(max(260, int(self.width() * 0.78)))
         lbl.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -4825,6 +4859,12 @@ class TasksDialog(QtWidgets.QDialog):
         self._config = config
         self._theme = get_ui_theme(getattr(config, "ui_theme", "auto"), character_id=getattr(config, "character_id", "lumi"))
         self.setStyleSheet(get_tasks_dialog_qss(self._theme))
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setAutoFillBackground(True)
+        pal = self.palette()
+        pal.setColor(QtGui.QPalette.ColorRole.Window, QtGui.QColor(self._theme.dialog_bg))
+        pal.setColor(QtGui.QPalette.ColorRole.Base, QtGui.QColor(self._theme.dialog_pane_bg))
+        self.setPalette(pal)
 
         self._on_data_changed = on_data_changed
         self._todo_filter = "pending"
@@ -4881,8 +4921,15 @@ class TasksDialog(QtWidgets.QDialog):
         self.refresh_data()
 
     def _build_todo_tab(self) -> None:
-        tab = QtWidgets.QWidget()
-        tab.setStyleSheet("background: #0f172a;")
+        tab = QtWidgets.QFrame()
+        tab.setObjectName("todoTab")
+        tab.setAttribute(QtCore.Qt.WidgetAttribute.WA_StyledBackground, True)
+        tab.setAutoFillBackground(True)
+        t_pal = tab.palette()
+        t_pal.setColor(QtGui.QPalette.ColorRole.Window, QtGui.QColor(self._theme.dialog_pane_bg))
+        t_pal.setColor(QtGui.QPalette.ColorRole.Base, QtGui.QColor(self._theme.dialog_pane_bg))
+        tab.setPalette(t_pal)
+        tab.setStyleSheet(f"QFrame#todoTab {{ background: {self._theme.dialog_pane_bg}; border: none; }}")
         layout = QtWidgets.QVBoxLayout(tab)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(10)
@@ -4916,6 +4963,8 @@ class TasksDialog(QtWidgets.QDialog):
 
         self._clear_done_btn = QtWidgets.QPushButton("🧹 Clear Completed")
         self._clear_done_btn.setFixedHeight(32)
+        self._clear_done_btn.setMinimumWidth(140)
+        self._clear_done_btn.setSizePolicy(QtWidgets.QSizePolicy.Policy.Minimum, QtWidgets.QSizePolicy.Policy.Fixed)
         self._clear_done_btn.setStyleSheet(
             "QPushButton{background:#334155;color:#e2e8f0;border-radius:6px;padding:4px 10px;font-size:11px;}"
             "QPushButton:hover{background:#475569;color:#fff;}"
@@ -4932,10 +4981,16 @@ class TasksDialog(QtWidgets.QDialog):
         # Scroll area for items
         self._todo_scroll = QtWidgets.QScrollArea()
         self._todo_scroll.setWidgetResizable(True)
-        self._todo_scroll.setStyleSheet("background: #0f172a; border: none;")
-        self._todo_scroll.viewport().setStyleSheet("background: #0f172a;")
-        self._todo_container = QtWidgets.QWidget()
-        self._todo_container.setStyleSheet("background: #0f172a;")
+        self._todo_scroll.setAttribute(QtCore.Qt.WidgetAttribute.WA_StyledBackground, True)
+        self._todo_scroll.viewport().setAttribute(QtCore.Qt.WidgetAttribute.WA_StyledBackground, True)
+        self._todo_scroll.setStyleSheet(f"background: {self._theme.dialog_pane_bg}; border: none;")
+        self._todo_scroll.viewport().setStyleSheet(f"background: {self._theme.dialog_pane_bg}; border: none;")
+        self._todo_container = QtWidgets.QFrame()
+        self._todo_container.setObjectName("todoContainer")
+        self._todo_container.setAttribute(QtCore.Qt.WidgetAttribute.WA_StyledBackground, True)
+        self._todo_container.setAutoFillBackground(True)
+        self._todo_container.setPalette(t_pal)
+        self._todo_container.setStyleSheet(f"QFrame#todoContainer {{ background: {self._theme.dialog_pane_bg}; border: none; }}")
         self._todo_layout = QtWidgets.QVBoxLayout(self._todo_container)
         self._todo_layout.setContentsMargins(4, 4, 12, 4)
         self._todo_layout.setSpacing(8)
@@ -4972,7 +5027,8 @@ class TasksDialog(QtWidgets.QDialog):
 
         self._add_todo_btn = QtWidgets.QPushButton("+ Add Task")
         self._add_todo_btn.setFixedHeight(36)
-        self._add_todo_btn.setMinimumWidth(90)
+        self._add_todo_btn.setMinimumWidth(105)
+        self._add_todo_btn.setSizePolicy(QtWidgets.QSizePolicy.Policy.Minimum, QtWidgets.QSizePolicy.Policy.Fixed)
         self._add_todo_btn.setStyleSheet(
             f"QPushButton{{background:{self._theme.accent_hover};color:#fff;font-weight:bold;border:none;border-radius:6px;padding:6px 14px;font-size:12px;}}"
             f"QPushButton:hover{{background:{self._theme.accent_color};}}"
@@ -4984,8 +5040,15 @@ class TasksDialog(QtWidgets.QDialog):
         self._tabs.addTab(tab, "📝 To-Do List")
 
     def _build_alarms_tab(self) -> None:
-        tab = QtWidgets.QWidget()
-        tab.setStyleSheet("background: #0f172a;")
+        tab = QtWidgets.QFrame()
+        tab.setObjectName("alarmsTab")
+        tab.setAttribute(QtCore.Qt.WidgetAttribute.WA_StyledBackground, True)
+        tab.setAutoFillBackground(True)
+        t_pal = tab.palette()
+        t_pal.setColor(QtGui.QPalette.ColorRole.Window, QtGui.QColor(self._theme.dialog_pane_bg))
+        t_pal.setColor(QtGui.QPalette.ColorRole.Base, QtGui.QColor(self._theme.dialog_pane_bg))
+        tab.setPalette(t_pal)
+        tab.setStyleSheet(f"QFrame#alarmsTab {{ background: {self._theme.dialog_pane_bg}; border: none; }}")
         layout = QtWidgets.QVBoxLayout(tab)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(10)
@@ -5038,12 +5101,14 @@ class TasksDialog(QtWidgets.QDialog):
         self._alm_repeat_combo.addItem("Weekdays (Mon-Fri)", "weekdays")
         self._alm_repeat_combo.addItem("Weekends (Sat-Sun)", "weekends")
         self._alm_repeat_combo.addItem("Once", "once")
-        self._alm_repeat_combo.setFixedWidth(155)
+        self._alm_repeat_combo.setFixedWidth(160)
+        self._alm_repeat_combo.setSizePolicy(QtWidgets.QSizePolicy.Policy.Minimum, QtWidgets.QSizePolicy.Policy.Fixed)
         row1.addWidget(self._alm_repeat_combo)
 
         self._add_alm_btn = QtWidgets.QPushButton("+ Set Alarm")
         self._add_alm_btn.setFixedHeight(36)
-        self._add_alm_btn.setMinimumWidth(105)
+        self._add_alm_btn.setMinimumWidth(115)
+        self._add_alm_btn.setSizePolicy(QtWidgets.QSizePolicy.Policy.Minimum, QtWidgets.QSizePolicy.Policy.Fixed)
         self._add_alm_btn.setStyleSheet(
             f"QPushButton{{background:{self._theme.accent_hover};color:#fff;font-weight:bold;border:none;border-radius:6px;padding:7px 14px;font-size:12px;}}"
             f"QPushButton:hover{{background:{self._theme.accent_color};}}"
@@ -5141,10 +5206,16 @@ class TasksDialog(QtWidgets.QDialog):
         # Alarms scroll area
         self._alarms_scroll = QtWidgets.QScrollArea()
         self._alarms_scroll.setWidgetResizable(True)
-        self._alarms_scroll.setStyleSheet("background: #0f172a; border: none;")
-        self._alarms_scroll.viewport().setStyleSheet("background: #0f172a;")
-        self._alarms_container = QtWidgets.QWidget()
-        self._alarms_container.setStyleSheet("background: #0f172a;")
+        self._alarms_scroll.setAttribute(QtCore.Qt.WidgetAttribute.WA_StyledBackground, True)
+        self._alarms_scroll.viewport().setAttribute(QtCore.Qt.WidgetAttribute.WA_StyledBackground, True)
+        self._alarms_scroll.setStyleSheet(f"background: {self._theme.dialog_pane_bg}; border: none;")
+        self._alarms_scroll.viewport().setStyleSheet(f"background: {self._theme.dialog_pane_bg}; border: none;")
+        self._alarms_container = QtWidgets.QFrame()
+        self._alarms_container.setObjectName("alarmsContainer")
+        self._alarms_container.setAttribute(QtCore.Qt.WidgetAttribute.WA_StyledBackground, True)
+        self._alarms_container.setAutoFillBackground(True)
+        self._alarms_container.setPalette(t_pal)
+        self._alarms_container.setStyleSheet(f"QFrame#alarmsContainer {{ background: {self._theme.dialog_pane_bg}; border: none; }}")
         self._alarms_layout = QtWidgets.QVBoxLayout(self._alarms_container)
         self._alarms_layout.setContentsMargins(4, 4, 12, 4)
         self._alarms_layout.setSpacing(6)
@@ -5155,8 +5226,15 @@ class TasksDialog(QtWidgets.QDialog):
         self._tabs.addTab(tab, "⏰ Alarms")
 
     def _build_reminders_tab(self) -> None:
-        tab = QtWidgets.QWidget()
-        tab.setStyleSheet("background: #0f172a;")
+        tab = QtWidgets.QFrame()
+        tab.setObjectName("remindersTab")
+        tab.setAttribute(QtCore.Qt.WidgetAttribute.WA_StyledBackground, True)
+        tab.setAutoFillBackground(True)
+        t_pal = tab.palette()
+        t_pal.setColor(QtGui.QPalette.ColorRole.Window, QtGui.QColor(self._theme.dialog_pane_bg))
+        t_pal.setColor(QtGui.QPalette.ColorRole.Base, QtGui.QColor(self._theme.dialog_pane_bg))
+        tab.setPalette(t_pal)
+        tab.setStyleSheet(f"QFrame#remindersTab {{ background: {self._theme.dialog_pane_bg}; border: none; }}")
         layout = QtWidgets.QVBoxLayout(tab)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(10)
@@ -5190,7 +5268,8 @@ class TasksDialog(QtWidgets.QDialog):
 
         rem_btn = QtWidgets.QPushButton("+ Set Reminder")
         rem_btn.setFixedHeight(36)
-        rem_btn.setMinimumWidth(125)
+        rem_btn.setMinimumWidth(130)
+        rem_btn.setSizePolicy(QtWidgets.QSizePolicy.Policy.Minimum, QtWidgets.QSizePolicy.Policy.Fixed)
         rem_btn.setStyleSheet(
             "QPushButton{background:#7c3aed;color:#fff;font-weight:bold;border:none;border-radius:6px;padding:6px 14px;font-size:12px;}"
             "QPushButton:hover{background:#6d28d9;}"
@@ -5202,10 +5281,16 @@ class TasksDialog(QtWidgets.QDialog):
         # Reminders scroll area
         self._rems_scroll = QtWidgets.QScrollArea()
         self._rems_scroll.setWidgetResizable(True)
-        self._rems_scroll.setStyleSheet("background: #0f172a; border: none;")
-        self._rems_scroll.viewport().setStyleSheet("background: #0f172a;")
-        self._rems_container = QtWidgets.QWidget()
-        self._rems_container.setStyleSheet("background: #0f172a;")
+        self._rems_scroll.setAttribute(QtCore.Qt.WidgetAttribute.WA_StyledBackground, True)
+        self._rems_scroll.viewport().setAttribute(QtCore.Qt.WidgetAttribute.WA_StyledBackground, True)
+        self._rems_scroll.setStyleSheet(f"background: {self._theme.dialog_pane_bg}; border: none;")
+        self._rems_scroll.viewport().setStyleSheet(f"background: {self._theme.dialog_pane_bg}; border: none;")
+        self._rems_container = QtWidgets.QFrame()
+        self._rems_container.setObjectName("remindersContainer")
+        self._rems_container.setAttribute(QtCore.Qt.WidgetAttribute.WA_StyledBackground, True)
+        self._rems_container.setAutoFillBackground(True)
+        self._rems_container.setPalette(t_pal)
+        self._rems_container.setStyleSheet(f"QFrame#remindersContainer {{ background: {self._theme.dialog_pane_bg}; border: none; }}")
         self._rems_layout = QtWidgets.QVBoxLayout(self._rems_container)
         self._rems_layout.setContentsMargins(4, 4, 12, 4)
         self._rems_layout.setSpacing(6)
@@ -5274,6 +5359,34 @@ class TasksDialog(QtWidgets.QDialog):
             self._config = config
         self._theme = get_ui_theme(getattr(self._config, "ui_theme", "auto"), character_id=getattr(self._config, "character_id", "lumi"))
         self.setStyleSheet(get_tasks_dialog_qss(self._theme))
+        pal = self.palette()
+        pal.setColor(QtGui.QPalette.ColorRole.Window, QtGui.QColor(self._theme.dialog_bg))
+        pal.setColor(QtGui.QPalette.ColorRole.Base, QtGui.QColor(self._theme.dialog_pane_bg))
+        self.setPalette(pal)
+
+        t_pal = QtGui.QPalette()
+        t_pal.setColor(QtGui.QPalette.ColorRole.Window, QtGui.QColor(self._theme.dialog_pane_bg))
+        t_pal.setColor(QtGui.QPalette.ColorRole.Base, QtGui.QColor(self._theme.dialog_pane_bg))
+
+        if hasattr(self, "_todo_scroll") and self._todo_scroll:
+            self._todo_scroll.setStyleSheet(f"background: {self._theme.dialog_pane_bg}; border: none;")
+            self._todo_scroll.viewport().setStyleSheet(f"background: {self._theme.dialog_pane_bg}; border: none;")
+        if hasattr(self, "_todo_container") and self._todo_container:
+            self._todo_container.setPalette(t_pal)
+            self._todo_container.setStyleSheet(f"QFrame#todoContainer {{ background: {self._theme.dialog_pane_bg}; border: none; }}")
+        if hasattr(self, "_alarms_scroll") and self._alarms_scroll:
+            self._alarms_scroll.setStyleSheet(f"background: {self._theme.dialog_pane_bg}; border: none;")
+            self._alarms_scroll.viewport().setStyleSheet(f"background: {self._theme.dialog_pane_bg}; border: none;")
+        if hasattr(self, "_alarms_container") and self._alarms_container:
+            self._alarms_container.setPalette(t_pal)
+            self._alarms_container.setStyleSheet(f"QFrame#alarmsContainer {{ background: {self._theme.dialog_pane_bg}; border: none; }}")
+        if hasattr(self, "_rems_scroll") and self._rems_scroll:
+            self._rems_scroll.setStyleSheet(f"background: {self._theme.dialog_pane_bg}; border: none;")
+            self._rems_scroll.viewport().setStyleSheet(f"background: {self._theme.dialog_pane_bg}; border: none;")
+        if hasattr(self, "_rems_container") and self._rems_container:
+            self._rems_container.setPalette(t_pal)
+            self._rems_container.setStyleSheet(f"QFrame#remindersContainer {{ background: {self._theme.dialog_pane_bg}; border: none; }}")
+
         if hasattr(self, "_title_lbl"):
             self._title_lbl.setStyleSheet(f"font-size: 17px; font-weight: bold; color: {self._theme.accent_color};")
         if hasattr(self, "_alm_title"):
@@ -5380,8 +5493,9 @@ class TasksDialog(QtWidgets.QDialog):
             # High-visibility solid Delete button
             del_btn = QtWidgets.QPushButton("🗑 Delete")
             del_btn.setToolTip("Delete this task")
-            del_btn.setFixedHeight(28)
-            del_btn.setMinimumWidth(86)
+            del_btn.setFixedHeight(30)
+            del_btn.setMinimumWidth(92)
+            del_btn.setSizePolicy(QtWidgets.QSizePolicy.Policy.Minimum, QtWidgets.QSizePolicy.Policy.Fixed)
             del_btn.setStyleSheet(
                 "QPushButton { background: #dc2626; color: #ffffff; border: none; border-radius: 6px; "
                 "font-size: 11px; font-weight: bold; padding: 4px 10px; } "
@@ -5456,8 +5570,9 @@ class TasksDialog(QtWidgets.QDialog):
             # High-visibility solid Delete button
             del_btn = QtWidgets.QPushButton("🗑 Delete")
             del_btn.setToolTip("Delete this alarm")
-            del_btn.setFixedHeight(28)
-            del_btn.setMinimumWidth(86)
+            del_btn.setFixedHeight(30)
+            del_btn.setMinimumWidth(92)
+            del_btn.setSizePolicy(QtWidgets.QSizePolicy.Policy.Minimum, QtWidgets.QSizePolicy.Policy.Fixed)
             del_btn.setStyleSheet(
                 "QPushButton { background: #dc2626; color: #ffffff; border: none; border-radius: 6px; "
                 "font-size: 11px; font-weight: bold; padding: 4px 10px; } "
@@ -5536,8 +5651,9 @@ class TasksDialog(QtWidgets.QDialog):
             # High-visibility solid Delete button
             del_btn = QtWidgets.QPushButton("🗑 Delete")
             del_btn.setToolTip("Delete this reminder")
-            del_btn.setFixedHeight(28)
-            del_btn.setMinimumWidth(86)
+            del_btn.setFixedHeight(30)
+            del_btn.setMinimumWidth(92)
+            del_btn.setSizePolicy(QtWidgets.QSizePolicy.Policy.Minimum, QtWidgets.QSizePolicy.Policy.Fixed)
             del_btn.setStyleSheet(
                 "QPushButton { background: #dc2626; color: #ffffff; border: none; border-radius: 6px; "
                 "font-size: 11px; font-weight: bold; padding: 4px 10px; } "
@@ -5686,8 +5802,15 @@ class TasksDialog(QtWidgets.QDialog):
     # ------------------------------------------------------------------------
 
     def _build_pomodoro_tab(self) -> None:
-        tab = QtWidgets.QWidget()
-        tab.setStyleSheet("background: #0f172a;")
+        tab = QtWidgets.QFrame()
+        tab.setObjectName("pomodoroTab")
+        tab.setAttribute(QtCore.Qt.WidgetAttribute.WA_StyledBackground, True)
+        tab.setAutoFillBackground(True)
+        t_pal = tab.palette()
+        t_pal.setColor(QtGui.QPalette.ColorRole.Window, QtGui.QColor(self._theme.dialog_pane_bg))
+        t_pal.setColor(QtGui.QPalette.ColorRole.Base, QtGui.QColor(self._theme.dialog_pane_bg))
+        tab.setPalette(t_pal)
+        tab.setStyleSheet(f"QFrame#pomodoroTab {{ background: {self._theme.dialog_pane_bg}; border: none; }}")
         layout = QtWidgets.QVBoxLayout(tab)
         layout.setContentsMargins(18, 16, 18, 16)
         layout.setSpacing(14)
