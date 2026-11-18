@@ -1294,6 +1294,21 @@ class CharacterWidget(QtWidgets.QWidget):
                 pt["y"] = 0.95
                 pt["x"] = random.uniform(0.15, 0.85)
 
+        # Smooth global desktop cursor tracking for 2.5D perspective & gaze
+        if not getattr(self, "_dragging", False):
+            try:
+                c_pos = QtGui.QCursor.pos()
+                center_global = self.mapToGlobal(self.rect().center())
+                dx = float(c_pos.x() - center_global.x())
+                dy = float(c_pos.y() - center_global.y())
+                # Smoothly track cursor across desktop (450px radius reaches full screen)
+                target_lx = max(-1.0, min(1.0, dx / 450.0))
+                target_ly = max(-1.0, min(1.0, dy / 450.0))
+                self._look_x += (target_lx - self._look_x) * 0.20
+                self._look_y += (target_ly - self._look_y) * 0.20
+            except Exception:
+                pass
+
         self.update()
 
     def paintEvent(self, event: QtGui.QPaintEvent) -> None:  # noqa: N802
@@ -1438,8 +1453,7 @@ class CharacterWidget(QtWidgets.QWidget):
     def leaveEvent(self, event: QtCore.QEvent) -> None:  # noqa: N802
         if self._state == "hover":
             self._state = "idle"
-        self._look_x = 0.0
-        self._look_y = 0.0
+        # Let global desktop tracking smoothly guide gaze without jarring snap
         super().leaveEvent(event)
 
     def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:  # noqa: N802
@@ -3277,6 +3291,8 @@ class CharacterPreviewWidget(QtWidgets.QWidget):
         p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
         p.setRenderHint(QtGui.QPainter.RenderHint.SmoothPixmapTransform)
         rect = QtCore.QRectF(2, 2, self._size - 4, self._size - 4)
+        look_lx = math.sin(self._phase * 0.7) * 0.25
+        look_ly = math.cos(self._phase * 0.5) * 0.15
         paint_animated_character(
             self._character_id,
             p,
@@ -3284,8 +3300,8 @@ class CharacterPreviewWidget(QtWidgets.QWidget):
             phase=self._phase,
             state="idle",
             blinking=self._blinking,
-            look_x=0.0,
-            look_y=0.0,
+            look_x=look_lx,
+            look_y=look_ly,
         )
         p.end()
 

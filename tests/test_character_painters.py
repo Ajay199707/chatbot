@@ -169,3 +169,64 @@ def test_character_widget_preset_switching():
         p.end()
     finally:
         w.deleteLater()
+
+
+def test_paint_volumetric_3d_parallax_gaze():
+    _get_qapp()
+    presets = list(cp.CHARACTER_PRESETS.keys())
+    gaze_angles = [
+        (-1.0, -1.0),
+        (-1.0, 1.0),
+        (1.0, -1.0),
+        (1.0, 1.0),
+        (0.0, 0.0),
+        (0.75, -0.45),
+    ]
+    for cid in presets:
+        for lx, ly in gaze_angles:
+            pm = QtGui.QPixmap(120, 120)
+            pm.fill(QtCore.Qt.GlobalColor.transparent)
+            p = QtGui.QPainter(pm)
+            p.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+            cp.paint_animated_character(
+                cid,
+                p,
+                QtCore.QRectF(2, 2, 116, 116),
+                phase=1.23,
+                state="idle",
+                blinking=False,
+                look_x=lx,
+                look_y=ly,
+            )
+            p.end()
+            assert not pm.isNull()
+
+
+def test_ground_shadow_signatures():
+    _get_qapp()
+    pm = QtGui.QPixmap(100, 100)
+    pm.fill(QtCore.Qt.GlobalColor.transparent)
+    p = QtGui.QPainter(pm)
+    # Legacy 3-arg call
+    cp._paint_ground_shadow(p, QtCore.QRectF(0, 0, 100, 100), 1.0)
+    # 3D 5-arg call
+    cp._paint_ground_shadow(p, QtCore.QRectF(0, 0, 100, 100), 0.85, look_x=0.5, look_y=-0.3)
+    p.end()
+    assert not pm.isNull()
+
+
+def test_character_widget_global_cursor_tracking():
+    _get_qapp()
+    cfg = dc.CharacterConfig(character_id="lumi")
+    w = dc.CharacterWidget(cfg)
+    try:
+        w.show()
+        # Initial look should be 0.0
+        assert hasattr(w, "_look_x") and hasattr(w, "_look_y")
+        # Run tick to verify spring damping calculation does not crash
+        w._on_tick()
+        assert -1.01 <= w._look_x <= 1.01
+        assert -1.01 <= w._look_y <= 1.01
+    finally:
+        w.close()
+        w.deleteLater()
