@@ -965,6 +965,54 @@ def markdown_to_qt_html(md_text: str) -> str:
             i += 1
             continue
 
+        if re.match(r"^\s*([*_-]\s*){3,}\s*$", line):
+            out.append("<hr style='border:none;border-top:1px solid #334155;margin:8px 0;'/>")
+            i += 1
+            continue
+
+        if line.strip().startswith("|") and line.strip().endswith("|") and i + 1 < len(lines):
+            next_line = lines[i + 1].strip()
+            if next_line.startswith("|") and next_line.endswith("|"):
+                sep_parts = [p.strip() for p in next_line.strip("|").split("|")]
+                if len(sep_parts) > 0 and all(re.match(r"^:?-+:?$", p) for p in sep_parts):
+                    headers = [p.strip() for p in line.strip().strip("|").split("|")]
+                    aligns = []
+                    for p in sep_parts:
+                        if p.startswith(":") and p.endswith(":"):
+                            aligns.append("center")
+                        elif p.endswith(":"):
+                            aligns.append("right")
+                        else:
+                            aligns.append("left")
+                    i += 2
+                    rows = []
+                    while i < len(lines) and lines[i].strip().startswith("|") and lines[i].strip().endswith("|"):
+                        cells = [c.strip() for c in lines[i].strip().strip("|").split("|")]
+                        rows.append(cells)
+                        i += 1
+                    
+                    table_html = [
+                        "<table width='100%' cellpadding='4' cellspacing='0' style='background:#111827;border:1px solid #1e293b;border-radius:6px;font-size:12px;margin:6px 0;'>"
+                    ]
+                    table_html.append("<tr style='background:#1e293b;'>")
+                    for col_idx, h_text in enumerate(headers):
+                        align = aligns[col_idx] if col_idx < len(aligns) else "left"
+                        fmt_h = _format_inline_md(h_text)
+                        table_html.append(f"<th align='{align}' style='color:#38bdf8;padding:5px 8px;border-bottom:1px solid #334155;font-weight:700;'>{fmt_h}</th>")
+                    table_html.append("</tr>")
+                    for r_idx, r_cells in enumerate(rows):
+                        bg = "background:rgba(30,41,59,0.35);" if (r_idx % 2 == 1) else ""
+                        table_html.append(f"<tr style='{bg}'>")
+                        for col_idx, cell in enumerate(r_cells):
+                            align = aligns[col_idx] if col_idx < len(aligns) else "left"
+                            fmt_c = _format_inline_md(cell)
+                            b_bottom = "border-bottom:1px solid #1e293b;" if (r_idx < len(rows) - 1) else ""
+                            table_html.append(f"<td align='{align}' style='color:#f1f5f9;padding:4px 8px;{b_bottom}'>{fmt_c}</td>")
+                        table_html.append("</tr>")
+                    table_html.append("</table>")
+                    out.append("".join(table_html))
+                    continue
+
         h = re.match(r"^(#{1,3})\s+(.*)$", line)
         if h:
             lvl = len(h.group(1))
@@ -998,6 +1046,8 @@ def markdown_to_qt_html(md_text: str) -> str:
             and not re.match(r"^#{1,3}\s+", lines[i])
             and not re.match(r"^\s*[-*+]\s+", lines[i])
             and not re.match(r"^\s*\d+\.\s+", lines[i])
+            and not re.match(r"^\s*([*_-]\s*){3,}\s*$", lines[i])
+            and not (lines[i].strip().startswith("|") and lines[i].strip().endswith("|"))
         ):
             para.append(_format_inline_md(lines[i]))
             i += 1
@@ -2480,7 +2530,7 @@ class ChatPopupWindow(QtWidgets.QWidget):
         self._msg_container.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.MinimumExpanding)
         self._msg_layout = QtWidgets.QVBoxLayout(self._msg_container)
         self._msg_layout.setSizeConstraint(QtWidgets.QLayout.SizeConstraint.SetMinimumSize)
-        self._msg_layout.setContentsMargins(2, 4, 2, 4)
+        self._msg_layout.setContentsMargins(2, 4, 2, 12)
         self._msg_layout.setSpacing(8)
         self._msg_layout.addStretch(1)
         self._scroll.setWidget(self._msg_container)
@@ -3039,10 +3089,13 @@ class ChatPopupWindow(QtWidgets.QWidget):
 
     def finish_assistant_message(self, final_text: str) -> None:
         self._render_timer.stop()
-        if self._streaming_bubble is not None and final_text:
-            self._streaming_bubble.setHtml(markdown_to_qt_html(final_text))
-            self._sync_browser_height(self._streaming_bubble)
+        if self._streaming_bubble is not None:
+            text_to_show = final_text or self._streaming_text
+            if text_to_show:
+                self._streaming_bubble.setHtml(markdown_to_qt_html(text_to_show))
+                self._sync_browser_height(self._streaming_bubble)
         self._streaming_bubble = None
+        self._streaming_text = ""
         self._scroll_to_bottom()
 
     def show_error(self, message: str) -> None:
@@ -3067,24 +3120,29 @@ class ChatPopupWindow(QtWidgets.QWidget):
         self._scroll_to_bottom()
 
     def _sync_browser_height(self, browser: QtWidgets.QTextBrowser) -> None:
-        vw = self._scroll.viewport().width() if hasattr(self, "_scroll") else 350
-        target_w = max(240, vw - 24) if vw > 50 else 350
-        browser.document().setTextWidth(target_w)
-        doc_h = int(browser.document().size().height()) + 20
-        browser.setFixedHeight(max(38, doc_h))
+        if not hasattr(self, "_scroll") or browser is None:
+            return
+        vw = self._scroll.viewport().width()
+        inner_w = max(180, vw - 42) if vw > 60 else 280
+        doc = browser.document()
+        doc.setTextWidth(inner_w)
+        layout_h = doc.documentLayout().documentSize().height()
+        doc_h = int(layout_h) + 26
+        browser.setFixedHeight(max(40, doc_h))
 
     def _sync_all_browser_heights(self) -> None:
         if not hasattr(self, "_scroll") or not hasattr(self, "_msg_layout"):
             return
         vw = self._scroll.viewport().width()
-        target_w = max(240, vw - 24) if vw > 50 else 350
+        inner_w = max(180, vw - 42) if vw > 60 else 280
         for i in range(self._msg_layout.count()):
             item = self._msg_layout.itemAt(i)
             w = item.widget() if item else None
             if isinstance(w, QtWidgets.QTextBrowser):
-                w.document().setTextWidth(target_w)
-                doc_h = int(w.document().size().height()) + 20
-                w.setFixedHeight(max(38, doc_h))
+                w.document().setTextWidth(inner_w)
+                layout_h = w.document().documentLayout().documentSize().height()
+                doc_h = int(layout_h) + 26
+                w.setFixedHeight(max(40, doc_h))
 
     def resizeEvent(self, event: QtGui.QResizeEvent) -> None:  # noqa: N802
         super().resizeEvent(event)
@@ -3099,12 +3157,16 @@ class ChatPopupWindow(QtWidgets.QWidget):
 
     def _on_scroll_value_changed(self, val: int) -> None:
         bar = self._scroll.verticalScrollBar()
-        self._user_scrolled_up = (bar.maximum() - val) > 40
+        if bar.maximum() > 0:
+            self._user_scrolled_up = (bar.maximum() - val) > 30
+        else:
+            self._user_scrolled_up = False
 
     def _scroll_to_bottom(self) -> None:
         self._scroll_timer.start()
 
     def _do_scroll_to_bottom(self) -> None:
+        self._user_scrolled_up = False
         self._msg_layout.activate()
         bar = self._scroll.verticalScrollBar()
         bar.setValue(bar.maximum())

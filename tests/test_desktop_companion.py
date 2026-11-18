@@ -1398,4 +1398,67 @@ def test_wake_greeting_close_button_and_top_position():
         popup.deleteLater()
 
 
+def test_markdown_tables_and_horizontal_rules():
+    raw_md = """AU Australia Bowling
+| Bowler | Overs | Maidens | Runs | Wickets | Economy |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| Spencer Johnson | 3.0 | 0 | 29 | 0 | 9.67 |
+| Mahli Beardman | 0.5 | 0 | 10 | 0 | 12.00 |
+---
+England got off to an aggressive flyer!"""
+
+    html_out = dc.markdown_to_qt_html(raw_md)
+    assert "<table" in html_out
+    assert "<th align='left'" in html_out
+    assert "Bowler" in html_out
+    assert "Spencer Johnson" in html_out
+    assert "Mahli Beardman" in html_out
+    assert "<hr style=" in html_out
+    assert "England got off to an aggressive flyer!" in html_out
+
+
+def test_chat_bubble_height_sync_prevents_overlap():
+    app = _get_qapp()
+    cfg = dc.CharacterConfig(character_id="lumi", ui_theme="auto")
+    popup = dc.ChatPopupWindow(cfg)
+    try:
+        popup.resize(360, 520)
+        popup.show()
+        app.processEvents()
+
+        # Add assistant message with 2 long paragraphs
+        p1 = "First long paragraph detailing the current match situation and highlights. " * 5
+        p2 = "Second long paragraph with extensive player statistics and commentary notes. " * 5
+        full_msg = f"{p1}\n\n{p2}"
+
+        popup.start_assistant_message()
+        popup.finish_assistant_message(full_msg)
+        app.processEvents()
+
+        # Add user message
+        popup.add_user_message("Give me the bowling scorecard")
+        app.processEvents()
+
+        # Assistant bubble is at item 1 (item 0 is system note or greeting)
+        asst_w = None
+        user_w = None
+        for i in range(popup._msg_layout.count()):
+            item = popup._msg_layout.itemAt(i)
+            w = item.widget() if item else None
+            if isinstance(w, QtWidgets.QTextBrowser):
+                asst_w = w
+            elif w and w.findChild(QtWidgets.QLabel, "userMsgBubble"):
+                user_w = w
+
+        assert asst_w is not None
+        assert user_w is not None
+        # User widget y must be strictly greater than assistant widget bottom (no overlap)
+        assert user_w.geometry().y() >= asst_w.geometry().bottom(), (
+            f"Overlap detected: user_w.y={user_w.geometry().y()} < asst_w.bottom={asst_w.geometry().bottom()}"
+        )
+    finally:
+        popup.deleteLater()
+
+
+
 
