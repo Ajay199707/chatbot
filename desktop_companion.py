@@ -37,9 +37,11 @@ import random
 import re
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
+import uuid
 import weakref
 
 from PySide6 import QtCore, QtGui, QtNetwork, QtWidgets
@@ -82,40 +84,272 @@ def play_alert_sound(kind: str = "reminder", enabled: bool = True) -> None:
 _CURRENT_VOICE_ENGINE: Any = None
 _VOICE_LOCK = threading.Lock()
 
+CHARACTER_VOICE_PROFILES: Dict[str, Dict[str, str]] = {
+    "lumi": {
+        "voice": "en-US-AnaNeural",
+        "pitch": "+0Hz",
+        "rate": "+2%",
+        "label": "Lumi (Cute & Cheerful - Ana)",
+    },
+    "ben_tennyson": {
+        "voice": "en-US-GuyNeural",
+        "pitch": "+2Hz",
+        "rate": "+4%",
+        "label": "Ben 10 (Heroic Boy - Guy)",
+    },
+    "heatblast": {
+        "voice": "en-US-EricNeural",
+        "pitch": "-12Hz",
+        "rate": "-2%",
+        "label": "Heatblast (Deep & Fiery - Eric)",
+    },
+    "gwen_classic": {
+        "voice": "en-US-JennyNeural",
+        "pitch": "+0Hz",
+        "rate": "+1%",
+        "label": "Gwen (Smart & Confident - Jenny)",
+    },
+}
+
+DEFAULT_VOICE_PROFILE: Dict[str, str] = {
+    "voice": "en-US-AvaNeural",
+    "pitch": "+0Hz",
+    "rate": "+0%",
+    "label": "Expressive Assistant (Ava)",
+}
+
+AVAILABLE_VOICE_OPTIONS: List[Tuple[str, str]] = [
+    ("auto", "Auto (Match Active Avatar)"),
+    ("lumi", "Lumi (Cute & Cheerful - Ana)"),
+    ("ben_tennyson", "Ben 10 (Heroic Boy - Guy)"),
+    ("heatblast", "Heatblast (Deep & Fiery - Eric)"),
+    ("gwen_classic", "Gwen (Smart & Confident - Jenny)"),
+    ("en-US-AvaNeural", "Ava (Expressive US Female)"),
+    ("en-US-BrianNeural", "Brian (Warm UK Male)"),
+    ("en-IN-NeerjaExpressiveNeural", "Neerja (Expressive Indian English)"),
+]
+
+
+def clean_text_for_speech(text: str) -> str:
+    """Prepare Markdown AI responses into natural, readable spoken prose."""
+    t = (text or "").strip()
+    if not t:
+        return ""
+    # Strip fenced code blocks
+    t = re.sub(r"```[\s\S]*?```", " Code snippet provided in chat. ", t)
+    # Strip markdown table rows
+    t = re.sub(r"\|[^\n]+\|", " ", t)
+    # Strip markdown links [label](url) -> label
+    t = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"\1", t)
+    # Strip bare URLs
+    t = re.sub(r"https?://\S+", "link", t)
+    # Strip common markdown decorators
+    t = re.sub(r"[*_~`#>]", " ", t)
+    # Strip divider rows
+    t = re.sub(r"^\s*[-=_]{3,}\s*$", " ", t, flags=re.MULTILINE)
+    # Remove emoji characters
+    t = re.sub(r"[\U00010000-\U0010ffff]", "", t)
+    # Normalize whitespaces
+    t = re.sub(r"\s+", " ", t).strip()
+
+    # Truncate long essays cleanly at a sentence end (around ~350 chars)
+    if len(t) > 360:
+        cut = t[:360]
+        last_p = max(cut.rfind("."), cut.rfind("!"), cut.rfind("?"))
+        if last_p > 140:
+            t = cut[: last_p + 1]
+        else:
+            t = cut.rstrip() + "..."
+    return t
+
+
+def _speak_sapi_sync(clean_text: str) -> None:
+    """Internal synchronous SAPI fallback."""
+    global _CURRENT_VOICE_ENGINE
+    if sys.platform != "win32" or not clean_text:
+        return
+    try:
+        import win32com.client
+        with _VOICE_LOCK:
+            if _CURRENT_VOICE_ENGINE is None:
+                _CURRENT_VOICE_ENGINE = win32com.client.Dispatch("SAPI.SpVoice")
+            _CURRENT_VOICE_ENGINE.Speak(clean_text, 0)
+    except Exception:
+        try:
+            ps_text = clean_text.replace('"', '`"').replace("'", " ")
+            subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 f"Add-Type -AssemblyName System.Speech; $s = New-Object System.Speech.Synthesis.SpeechSynthesizer; $s.Speak('{ps_text}')"],
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                timeout=15,
+            )
+        except Exception:
+            pass
+
+
+class TextToSpeechManager:
+    """Manages Edge-TTS neural speech synthesis and asynchronous native Windows playback."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._is_speaking = False
+        self._stop_event = threading.Event()
+        self._active_file: Optional[str] = None
+
+    def is_speaking(self) -> bool:
+        return self._is_speaking
+
+    def stop(self) -> None:
+        """Immediately stop any current speech playback and clean up resources."""
+        self._stop_event.set()
+        if sys.platform == "win32":
+            try:
+                ctypes.windll.winmm.mciSendStringW("stop tts_audio", None, 0, None)
+                ctypes.windll.winmm.mciSendStringW("close tts_audio", None, 0, None)
+            except Exception:
+                pass
+        self._is_speaking = False
+        if self._active_file and os.path.exists(self._active_file):
+            try:
+                os.remove(self._active_file)
+            except Exception:
+                pass
+            self._active_file = None
+        stop_voice_briefing()
+
+    def speak(
+        self,
+        text: str,
+        character_id: str = "lumi",
+        voice_override: str = "auto",
+        on_started: Optional[Any] = None,
+        on_finished: Optional[Any] = None,
+    ) -> None:
+        """Speak text asynchronously in a background thread."""
+        self.stop()
+        clean = clean_text_for_speech(text)
+        if not clean:
+            return
+
+        clean_cid = (character_id or "lumi").strip().lower()
+        clean_override = (voice_override or "auto").strip()
+
+        if clean_override != "auto" and clean_override in CHARACTER_VOICE_PROFILES:
+            profile = CHARACTER_VOICE_PROFILES[clean_override]
+        elif clean_override != "auto" and "-" in clean_override:
+            profile = {"voice": clean_override, "pitch": "+0Hz", "rate": "+0%"}
+        elif clean_cid in CHARACTER_VOICE_PROFILES:
+            profile = CHARACTER_VOICE_PROFILES[clean_cid]
+        else:
+            profile = DEFAULT_VOICE_PROFILE
+
+        voice = profile.get("voice", "en-US-AnaNeural")
+        pitch = profile.get("pitch", "+0Hz")
+        rate = profile.get("rate", "+0%")
+
+        self._stop_event.clear()
+
+        def _worker():
+            temp_path = os.path.join(tempfile.gettempdir(), f"ai_tts_{uuid.uuid4().hex[:8]}.mp3")
+            self._active_file = temp_path
+
+            generated_ok = False
+            try:
+                import edge_tts, asyncio
+                comm = edge_tts.Communicate(clean, voice, pitch=pitch, rate=rate)
+                asyncio.run(comm.save(temp_path))
+                if os.path.isfile(temp_path) and os.path.getsize(temp_path) > 1000:
+                    generated_ok = True
+            except Exception:
+                generated_ok = False
+
+            if self._stop_event.is_set():
+                if os.path.exists(temp_path):
+                    try:
+                        os.remove(temp_path)
+                    except Exception:
+                        pass
+                return
+
+            if generated_ok and sys.platform == "win32":
+                try:
+                    mci = ctypes.windll.winmm.mciSendStringW
+                    mci(f'open "{temp_path}" type mpegvideo alias tts_audio', None, 0, None)
+                    mci("play tts_audio", None, 0, None)
+                    self._is_speaking = True
+                    if on_started:
+                        try:
+                            on_started()
+                        except Exception:
+                            pass
+
+                    buf = ctypes.create_unicode_buffer(64)
+                    while not self._stop_event.is_set():
+                        time.sleep(0.12)
+                        mci("status tts_audio mode", buf, 64, None)
+                        if buf.value != "playing":
+                            break
+
+                    mci("stop tts_audio", None, 0, None)
+                    mci("close tts_audio", None, 0, None)
+                except Exception:
+                    pass
+                finally:
+                    self._is_speaking = False
+                    if os.path.exists(temp_path):
+                        try:
+                            os.remove(temp_path)
+                        except Exception:
+                            pass
+                    self._active_file = None
+                    if on_finished:
+                        try:
+                            on_finished()
+                        except Exception:
+                            pass
+            else:
+                try:
+                    if on_started:
+                        try:
+                            on_started()
+                        except Exception:
+                            pass
+                    _speak_sapi_sync(clean)
+                finally:
+                    self._is_speaking = False
+                    if on_finished:
+                        try:
+                            on_finished()
+                        except Exception:
+                            pass
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+
+_GLOBAL_TTS_MANAGER: Optional[TextToSpeechManager] = None
+
 
 def speak_voice_briefing(text: str) -> None:
-    """Speak text asynchronously using native Windows Speech Synthesis (SAPI)."""
+    """Speak text asynchronously using Edge-TTS if available, falling back to SAPI."""
     if sys.platform != "win32" or not (text or "").strip():
+        return
+    global _GLOBAL_TTS_MANAGER
+    if _GLOBAL_TTS_MANAGER is not None:
+        _GLOBAL_TTS_MANAGER.speak(text)
         return
 
     def _worker():
-        global _CURRENT_VOICE_ENGINE
-        clean_text = text.strip()
-        try:
-            import win32com.client
-            with _VOICE_LOCK:
-                if _CURRENT_VOICE_ENGINE is None:
-                    _CURRENT_VOICE_ENGINE = win32com.client.Dispatch("SAPI.SpVoice")
-                # 1 = SVSFlagsAsync, 2 = SVSFPurgeBeforeSpeak
-                _CURRENT_VOICE_ENGINE.Speak(clean_text, 1 | 2)
-        except Exception:
-            try:
-                import subprocess
-                ps_text = clean_text.replace('"', '`"').replace("'", " ")
-                subprocess.Popen(
-                    ["powershell", "-NoProfile", "-Command",
-                     f"Add-Type -AssemblyName System.Speech; $s = New-Object System.Speech.Synthesis.SpeechSynthesizer; $s.Speak('{ps_text}')"],
-                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                )
-            except Exception:
-                pass
+        clean_text = clean_text_for_speech(text)
+        _speak_sapi_sync(clean_text)
 
     threading.Thread(target=_worker, daemon=True).start()
 
 
 def stop_voice_briefing() -> None:
     """Stop any currently speaking voice briefing immediately."""
-    global _CURRENT_VOICE_ENGINE
+    global _CURRENT_VOICE_ENGINE, _GLOBAL_TTS_MANAGER
+    if _GLOBAL_TTS_MANAGER is not None and _GLOBAL_TTS_MANAGER.is_speaking():
+        _GLOBAL_TTS_MANAGER.stop()
     if sys.platform != "win32":
         return
     try:
@@ -657,6 +891,9 @@ class CharacterConfig:
     custom_alarm_sound_path: str = ""
     voice_alarm_enabled: bool = True
     ui_theme: str = "auto"
+    tts_enabled: bool = True
+    tts_voice: str = "auto"
+    cricket_ticker_enabled: bool = True
 
     @classmethod
     def load(cls, path: Path = CONFIG_FILE) -> "CharacterConfig":
@@ -699,6 +936,9 @@ class CharacterConfig:
                 cfg.wake_resume_cooldown_minutes = 120
             cfg.wake_user_name = (cfg.wake_user_name or "").strip()
             cfg.wake_weather_city = (cfg.wake_weather_city or "Chennai").strip() or "Chennai"
+            cfg.tts_enabled = bool(getattr(cfg, "tts_enabled", True))
+            cfg.tts_voice = str(getattr(cfg, "tts_voice", "auto") or "auto").strip()
+            cfg.cricket_ticker_enabled = bool(getattr(cfg, "cricket_ticker_enabled", True))
             return cfg
         except Exception:
             return cls()
@@ -1556,6 +1796,8 @@ class CharacterWidget(QtWidgets.QWidget):
     provider_change_requested = QtCore.Signal(str)
     system_tools_toggled = QtCore.Signal(bool)
     all_drives_toggled = QtCore.Signal(bool)
+    voice_toggled = QtCore.Signal(bool)
+    cricket_ticker_toggled = QtCore.Signal(bool)
     reset_pos_requested = QtCore.Signal()
     hide_requested = QtCore.Signal()
     quit_requested = QtCore.Signal()
@@ -1943,6 +2185,12 @@ class CharacterWidget(QtWidgets.QWidget):
         act_all_drives = menu.addAction("Control All Drives (Full PC)")
         act_all_drives.setCheckable(True)
         act_all_drives.setChecked(self._config.allow_all_user_folders)
+        act_voice = menu.addAction("🔊 Neural Voice Output (Edge-TTS)")
+        act_voice.setCheckable(True)
+        act_voice.setChecked(bool(getattr(self._config, "tts_enabled", True)))
+        act_ticker = menu.addAction("🏏 Live Cricket Ticker Pill")
+        act_ticker.setCheckable(True)
+        act_ticker.setChecked(bool(getattr(self._config, "cricket_ticker_enabled", True)))
         menu.addSeparator()
 
         prov_menu = menu.addMenu("Switch Provider")
@@ -1980,6 +2228,10 @@ class CharacterWidget(QtWidgets.QWidget):
             self.system_tools_toggled.emit(act_sys_tools.isChecked())
         elif chosen == act_all_drives:
             self.all_drives_toggled.emit(act_all_drives.isChecked())
+        elif chosen == act_voice:
+            self.voice_toggled.emit(act_voice.isChecked())
+        elif chosen == act_ticker:
+            self.cricket_ticker_toggled.emit(act_ticker.isChecked())
         elif chosen == act_reset:
             self.reset_pos_requested.emit()
         elif chosen == act_hide:
@@ -2221,6 +2473,169 @@ class WakeupBubbleWidget(QtWidgets.QWidget):
         super().mouseReleaseEvent(event)
 
 
+class CricketTickerWidget(QtWidgets.QWidget):
+    """Compact docked floating pill showing real-time live cricket scores beside the companion."""
+
+    score_clicked = QtCore.Signal(str, str)  # (match_id, title)
+    refresh_requested = QtCore.Signal()
+    dismissed = QtCore.Signal()
+
+    def __init__(self, character_name: str = "Lumi", theme: Optional[UITheme] = None):
+        super().__init__(
+            None,
+            QtCore.Qt.WindowType.FramelessWindowHint
+            | QtCore.Qt.WindowType.WindowStaysOnTopHint
+            | QtCore.Qt.WindowType.Tool,
+        )
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+
+        self._match_id = ""
+        self._title = "Live Cricket"
+        self._accent = theme.accent_color if theme else "#38bdf8"
+
+        outer = QtWidgets.QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+
+        self._card = QtWidgets.QFrame()
+        self._card.setObjectName("cricketTickerCard")
+        self._card.setFixedWidth(275)
+        outer.addWidget(self._card)
+
+        col = QtWidgets.QVBoxLayout(self._card)
+        col.setContentsMargins(10, 7, 10, 8)
+        col.setSpacing(3)
+
+        # Header: Live badge, Title, Refresh, Close
+        top = QtWidgets.QHBoxLayout()
+        top.setSpacing(6)
+
+        self._live_badge = QtWidgets.QLabel("● LIVE")
+        self._live_badge.setStyleSheet(
+            "background:#ef4444;color:#ffffff;border-radius:4px;padding:1px 5px;font-weight:800;font-size:9px;"
+        )
+        top.addWidget(self._live_badge)
+
+        self._title_lbl = QtWidgets.QLabel("🏏 Cricket Live")
+        self._title_lbl.setStyleSheet("font-size:11.5px;font-weight:700;color:#f8fafc;")
+        top.addWidget(self._title_lbl, 1)
+
+        self._refresh_btn = QtWidgets.QPushButton("🔄")
+        self._refresh_btn.setFixedSize(18, 18)
+        self._refresh_btn.setToolTip("Refresh Live Score")
+        self._refresh_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        self._refresh_btn.setStyleSheet(
+            "background:transparent;color:#94a3b8;border:none;font-size:11px;padding:0;"
+        )
+        self._refresh_btn.clicked.connect(self.refresh_requested.emit)
+        top.addWidget(self._refresh_btn)
+
+        self._close_btn = QtWidgets.QPushButton("×")
+        self._close_btn.setFixedSize(18, 18)
+        self._close_btn.setToolTip("Dismiss Ticker")
+        self._close_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        self._close_btn.setStyleSheet(
+            "background:transparent;color:#94a3b8;border:none;font-size:13px;font-weight:700;padding:0;"
+        )
+        self._close_btn.clicked.connect(self.dismiss_ticker)
+        top.addWidget(self._close_btn)
+        col.addLayout(top)
+
+        # Score line
+        self._score_lbl = QtWidgets.QLabel("Loading score...")
+        self._score_lbl.setStyleSheet(f"font-size:13px;font-weight:700;color:{self._accent};")
+        col.addWidget(self._score_lbl)
+
+        # Status / Subtitle line
+        self._status_lbl = QtWidgets.QLabel("Checking Cricbuzz...")
+        self._status_lbl.setStyleSheet("font-size:10px;color:#94a3b8;")
+        self._status_lbl.setWordWrap(True)
+        col.addWidget(self._status_lbl)
+
+        self._apply_style()
+
+    def _apply_style(self) -> None:
+        self._card.setStyleSheet(
+            f"""
+            #cricketTickerCard {{
+                background: rgba(15, 23, 42, 0.94);
+                border: 1.5px solid {self._accent};
+                border-radius: 12px;
+            }}
+            QLabel {{ background: transparent; border: none; }}
+            """
+        )
+        self._score_lbl.setStyleSheet(f"font-size:13px;font-weight:700;color:{self._accent};")
+
+    def apply_theme(self, theme: UITheme) -> None:
+        if theme:
+            self._accent = theme.accent_color
+            self._apply_style()
+
+    @QtCore.Slot(object)
+    def update_data(self, data: Dict[str, Any]) -> None:
+        if not data:
+            return
+        self._match_id = str(data.get("match_id") or "")
+        title = data.get("title") or "Cricket Match"
+        self._title = title
+        self._title_lbl.setText(f"🏏 {title[:22]}")
+
+        is_live = bool(data.get("is_live", False))
+        if is_live:
+            self._live_badge.setText("● LIVE")
+            self._live_badge.setStyleSheet(
+                "background:#ef4444;color:#ffffff;border-radius:4px;padding:1px 5px;font-weight:800;font-size:9px;"
+            )
+            self._live_badge.show()
+        else:
+            state = data.get("state") or "Result"
+            self._live_badge.setText(state.upper()[:8])
+            self._live_badge.setStyleSheet(
+                "background:#334155;color:#94a3b8;border-radius:4px;padding:1px 5px;font-weight:700;font-size:9px;"
+            )
+            self._live_badge.show()
+
+        score = data.get("score") or "Score unavailable"
+        self._score_lbl.setText(score)
+
+        status = data.get("status") or ""
+        self._status_lbl.setText(status)
+        self.adjustSize()
+
+    def reposition_near(self, char_geo: QtCore.QRect) -> None:
+        screen = QtGui.QGuiApplication.screenAt(char_geo.center()) or QtGui.QGuiApplication.primaryScreen()
+        avail = screen.availableGeometry() if screen else QtCore.QRect(0, 0, 1280, 720)
+        tw = max(self.width(), self.sizeHint().width(), 260)
+        th = max(self.height(), self.sizeHint().height(), 60)
+
+        bx = char_geo.center().x() - tw // 2
+        by = char_geo.top() - th - 8
+
+        if by < avail.top() + 8:
+            by = char_geo.top()
+            if char_geo.center().x() > avail.center().x():
+                bx = char_geo.left() - tw - 8
+            else:
+                bx = char_geo.right() + 8
+
+        bx = max(avail.left() + 8, min(avail.right() - tw - 8, bx))
+        by = max(avail.top() + 8, min(avail.bottom() - th - 8, by))
+        self.move(bx, by)
+
+    def dismiss_ticker(self) -> None:
+        self.hide()
+        self.dismissed.emit()
+
+    def mouseReleaseEvent(self, event: QtGui.QMouseEvent) -> None:  # noqa: N802
+        if event.button() == QtCore.Qt.MouseButton.LeftButton:
+            self.score_clicked.emit(self._match_id, self._title)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+
 # ============================================================
 # CHAT POPUP DRAWER
 # ============================================================
@@ -2348,6 +2763,7 @@ class ChatPopupWindow(QtWidgets.QWidget):
     provider_switch_requested = QtCore.Signal(str, str)
     enable_web_tools_requested = QtCore.Signal()
     briefing_requested = QtCore.Signal()
+    voice_toggled = QtCore.Signal(bool)
 
     def __init__(self, config: CharacterConfig):
         super().__init__(
@@ -2432,6 +2848,16 @@ class ChatPopupWindow(QtWidgets.QWidget):
         self._pin_btn.setToolTip("Keep window open")
         self._pin_btn.toggled.connect(self._on_pin_toggled)
         hbox.addWidget(self._pin_btn)
+
+        self._voice_btn = QtWidgets.QPushButton("🔊")
+        self._voice_btn.setToolTip("Toggle Neural Voice Output (Edge-TTS)")
+        self._voice_btn.setCheckable(True)
+        self._voice_btn.setFixedWidth(28)
+        is_voice_on = bool(getattr(self._config, "tts_enabled", True))
+        self._voice_btn.setChecked(is_voice_on)
+        self._voice_btn.setText("🔊" if is_voice_on else "🔇")
+        self._voice_btn.toggled.connect(self._on_voice_toggled)
+        hbox.addWidget(self._voice_btn)
 
         settings_btn = QtWidgets.QPushButton("Edit")
         settings_btn.setToolTip("Customize character name, size & persona")
@@ -2644,6 +3070,10 @@ class ChatPopupWindow(QtWidgets.QWidget):
         self._pinned = checked
         self._pin_btn.setText("Pinned" if checked else "Pin")
 
+    def _on_voice_toggled(self, checked: bool) -> None:
+        self._voice_btn.setText("🔊" if checked else "🔇")
+        self.voice_toggled.emit(checked)
+
     def is_pinned(self) -> bool:
         return self._pinned
 
@@ -2753,6 +3183,10 @@ class ChatPopupWindow(QtWidgets.QWidget):
         self._avatar_lbl.setPixmap(draw_pet_pixmap(34, config.sprite_path, config.character_id))
         preset = get_character_preset(config.character_id)
         self._avatar_lbl.setStyleSheet(f"border-radius:18px;border:1.5px solid {preset.accent_color};padding:1px;background:#111827;")
+        if hasattr(self, "_voice_btn"):
+            en = bool(getattr(config, "tts_enabled", True))
+            self._voice_btn.setChecked(en)
+            self._voice_btn.setText("🔊" if en else "🔇")
         needs_key = chatbot.requires_api_key(config.provider) and not chatbot.resolve_api_key(config.provider)
         if hasattr(self, "_status_dot"):
             if needs_key:
@@ -4336,6 +4770,36 @@ class SettingsDialog(QtWidgets.QDialog):
         self._voice_alarm_chk.setChecked(bool(getattr(self._config, "voice_alarm_enabled", True)))
         wake_layout.addWidget(self._voice_alarm_chk)
 
+        self._tts_enabled_chk = QtWidgets.QCheckBox(
+            "Speak character replies with Edge-TTS Neural Voice"
+        )
+        self._tts_enabled_chk.setChecked(bool(getattr(self._config, "tts_enabled", True)))
+        wake_layout.addWidget(self._tts_enabled_chk)
+
+        tts_row = QtWidgets.QHBoxLayout()
+        tts_row.setSpacing(8)
+        tts_row.addWidget(QtWidgets.QLabel("Character Voice:"))
+        self._tts_voice_combo = QtWidgets.QComboBox()
+        for v_id, v_lbl in AVAILABLE_VOICE_OPTIONS:
+            self._tts_voice_combo.addItem(v_lbl, v_id)
+        cur_v = getattr(self._config, "tts_voice", "auto")
+        v_idx = self._tts_voice_combo.findData(cur_v)
+        if v_idx >= 0:
+            self._tts_voice_combo.setCurrentIndex(v_idx)
+        tts_row.addWidget(self._tts_voice_combo, 1)
+
+        test_voice_btn = QtWidgets.QPushButton("▶ Test Voice")
+        test_voice_btn.setToolTip("Play a voice sample for the selected persona")
+        test_voice_btn.clicked.connect(self._test_tts_voice)
+        tts_row.addWidget(test_voice_btn)
+        wake_layout.addLayout(tts_row)
+
+        self._cricket_ticker_chk = QtWidgets.QCheckBox(
+            "Show Docked Live Cricket Score Ticker beside character"
+        )
+        self._cricket_ticker_chk.setChecked(bool(getattr(self._config, "cricket_ticker_enabled", True)))
+        wake_layout.addWidget(self._cricket_ticker_chk)
+
         # Sound theme selection
         theme_row = QtWidgets.QHBoxLayout()
         theme_row.setSpacing(8)
@@ -4754,6 +5218,12 @@ class SettingsDialog(QtWidgets.QDialog):
         self._config.alarm_sound_theme = self._sound_theme_combo.currentData() or "digital_beep"
         self._config.custom_alarm_sound_path = self._custom_wav_edit.text().strip()
         self._config.voice_alarm_enabled = self._voice_alarm_chk.isChecked()
+        if hasattr(self, "_tts_enabled_chk"):
+            self._config.tts_enabled = self._tts_enabled_chk.isChecked()
+        if hasattr(self, "_tts_voice_combo"):
+            self._config.tts_voice = self._tts_voice_combo.currentData() or "auto"
+        if hasattr(self, "_cricket_ticker_chk"):
+            self._config.cricket_ticker_enabled = self._cricket_ticker_chk.isChecked()
         if hasattr(self, "_theme_combo"):
             self._config.ui_theme = self._theme_combo.currentData() or "auto"
         return self._config
@@ -4773,6 +5243,14 @@ class SettingsDialog(QtWidgets.QDialog):
         threading.Thread(
             target=lambda: play_alarm_ringtone(theme, custom_p, stop_ev), daemon=True
         ).start()
+
+    def _test_tts_voice(self) -> None:
+        sel_voice = self._tts_voice_combo.currentData() or "auto"
+        cid = self._selected_character_id or "lumi"
+        preset = get_character_preset(cid)
+        sample = f"Hello! I am {preset.name}. My neural voice is ready to chat with you!"
+        mgr = TextToSpeechManager()
+        mgr.speak(sample, character_id=cid, voice_override=sel_voice)
 
     def apply_system_changes(self, env_path: Optional[Path] = None, startup_dir: Optional[Path] = None) -> bool:
         """Persist any newly entered API keys to .env and update Windows Startup if toggled."""
@@ -6160,8 +6638,14 @@ class DesktopCompanionApp(QtCore.QObject):
             )
         )
 
+        self._tts_manager = TextToSpeechManager()
+        global _GLOBAL_TTS_MANAGER
+        _GLOBAL_TTS_MANAGER = self._tts_manager
+
         self.character = CharacterWidget(config)
         self.wakeup_bubble = WakeupBubbleWidget(config.character_name)
+        theme = get_ui_theme(getattr(config, "ui_theme", "auto"), character_id=getattr(config, "character_id", "lumi"))
+        self.cricket_ticker = CricketTickerWidget(config.character_name, theme=theme)
         self.popup = ChatPopupWindow(config)
         self._tray = self._create_tray_icon()
 
@@ -6177,6 +6661,8 @@ class DesktopCompanionApp(QtCore.QObject):
         self.character.clear_chat_requested.connect(self.clear_conversation)
         self.character.system_tools_toggled.connect(self.toggle_system_tools)
         self.character.all_drives_toggled.connect(self.toggle_all_drives)
+        self.character.voice_toggled.connect(self.toggle_voice_replies)
+        self.character.cricket_ticker_toggled.connect(self.toggle_cricket_ticker)
         self.character.provider_change_requested.connect(self.switch_provider)
         self.character.tasks_requested.connect(self.open_tasks_dialog)
         self.character.pomodoro_requested.connect(self.open_pomodoro_tab)
@@ -6185,6 +6671,11 @@ class DesktopCompanionApp(QtCore.QObject):
         self.character.hide_requested.connect(self.hide_character)
         self.character.quit_requested.connect(self.quit_app)
         self.wakeup_bubble.chat_requested.connect(self._on_wakeup_bubble_clicked)
+
+        # Wire cricket ticker signals
+        self.cricket_ticker.score_clicked.connect(self._on_ticker_score_clicked)
+        self.cricket_ticker.refresh_requested.connect(self._fetch_cricket_ticker_data)
+        self.cricket_ticker.dismissed.connect(self._on_ticker_dismissed)
 
         # Wire popup signals
         self.popup.send_message.connect(self.send_user_message)
@@ -6201,11 +6692,20 @@ class DesktopCompanionApp(QtCore.QObject):
             lambda p, m: self.switch_provider(p, m or None)
         )
         self.popup.enable_web_tools_requested.connect(lambda: self.toggle_web_tools(True))
+        self.popup.voice_toggled.connect(self._on_popup_voice_toggled)
 
         # Alert popup & tasks dialog
         self._alert_popup: Optional[AlertNotificationPopup] = None
         self._tasks_dialog: Optional[TasksDialog] = None
         self._snipper: Optional[ScreenSnippingOverlay] = None
+
+        # 60-second background timer for live cricket scores
+        self._cricket_timer = QtCore.QTimer(self.character)
+        self._cricket_timer.setInterval(60000)
+        self._cricket_timer.timeout.connect(self._fetch_cricket_ticker_data)
+        if getattr(config, "cricket_ticker_enabled", True):
+            self._cricket_timer.start()
+            QtCore.QTimer.singleShot(2500, self._fetch_cricket_ticker_data)
 
         # 1-second background timer checking for Pomodoro ticks, due alarms and reminders
         self._reminder_timer = QtCore.QTimer(self.character)
@@ -6307,6 +6807,8 @@ class DesktopCompanionApp(QtCore.QObject):
             self._position_popup_near_character()
         if self.wakeup_bubble.isVisible():
             self.wakeup_bubble.reposition_near(self.character.frameGeometry())
+        if hasattr(self, "cricket_ticker") and self.cricket_ticker.isVisible():
+            self.cricket_ticker.reposition_near(self.character.frameGeometry())
 
     def _on_character_moved(self, x: int, y: int) -> None:
         self._config.window_pos = [x, y]
@@ -6315,6 +6817,8 @@ class DesktopCompanionApp(QtCore.QObject):
             self._position_popup_near_character()
         if self.wakeup_bubble.isVisible():
             self.wakeup_bubble.reposition_near(self.character.frameGeometry())
+        if hasattr(self, "cricket_ticker") and self.cricket_ticker.isVisible():
+            self.cricket_ticker.reposition_near(self.character.frameGeometry())
 
     def _position_popup_near_character(self) -> None:
         char_geo = self.character.frameGeometry()
@@ -6695,6 +7199,13 @@ class DesktopCompanionApp(QtCore.QObject):
                     allow_all_drives=bool(new_cfg.allow_all_user_folders),
                 ),
             )
+        theme = get_ui_theme(getattr(new_cfg, "ui_theme", "auto"), character_id=getattr(new_cfg, "character_id", "lumi"))
+        if hasattr(self, "cricket_ticker"):
+            self.cricket_ticker.apply_theme(theme)
+            if not getattr(new_cfg, "cricket_ticker_enabled", True):
+                self.cricket_ticker.hide()
+            elif self.character.isVisible():
+                self._fetch_cricket_ticker_data()
         self.character.apply_config(new_cfg)
         self.wakeup_bubble.set_character_name(new_cfg.character_name)
         self.popup.apply_config(new_cfg)
@@ -6706,6 +7217,8 @@ class DesktopCompanionApp(QtCore.QObject):
             self._position_popup_near_character()
         if self.wakeup_bubble.isVisible():
             self.wakeup_bubble.reposition_near(self.character.frameGeometry())
+        if hasattr(self, "cricket_ticker") and self.cricket_ticker.isVisible():
+            self.cricket_ticker.reposition_near(self.character.frameGeometry())
 
     def _on_size_changed(self, new_size: int) -> None:
         clamped = max(40, min(260, int(new_size)))
@@ -6717,6 +7230,8 @@ class DesktopCompanionApp(QtCore.QObject):
             self._position_popup_near_character()
         if self.wakeup_bubble.isVisible():
             self.wakeup_bubble.reposition_near(self.character.frameGeometry())
+        if hasattr(self, "cricket_ticker") and self.cricket_ticker.isVisible():
+            self.cricket_ticker.reposition_near(self.character.frameGeometry())
 
     def _on_sprite_changed(self, path: str) -> None:
         self._config.sprite_path = path
@@ -6927,6 +7442,8 @@ class DesktopCompanionApp(QtCore.QObject):
         popup.move(x, y)
 
     def clear_conversation(self) -> None:
+        if hasattr(self, "_tts_manager"):
+            self._tts_manager.stop()
         if self._worker_thread is not None and self._worker_thread.isRunning():
             return
         with self._bot_lock:
@@ -6935,6 +7452,8 @@ class DesktopCompanionApp(QtCore.QObject):
         self.popup.add_system_note("Conversation cleared.")
 
     def send_user_message(self, prompt: str, images: Optional[List[str]] = None) -> None:
+        if hasattr(self, "_tts_manager"):
+            self._tts_manager.stop()
         if self._worker_thread is not None and self._worker_thread.isRunning():
             return
 
@@ -6970,6 +7489,8 @@ class DesktopCompanionApp(QtCore.QObject):
         thread.start()
 
     def stop_streaming(self) -> None:
+        if hasattr(self, "_tts_manager"):
+            self._tts_manager.stop()
         if self._worker is not None:
             self._worker.cancel_event.set()
             self.popup.set_status("Stopping...")
@@ -7003,10 +7524,92 @@ class DesktopCompanionApp(QtCore.QObject):
         self.character.set_state("idle")
         if final_text and not self.popup.isVisible():
             self.character.show_speech_bubble(final_text)
+        if getattr(self._config, "tts_enabled", True) and final_text and hasattr(self, "_tts_manager"):
+            self._tts_manager.speak(
+                final_text,
+                character_id=getattr(self._config, "character_id", "lumi"),
+                voice_override=getattr(self._config, "tts_voice", "auto"),
+                on_started=lambda: QtCore.QMetaObject.invokeMethod(
+                    self.character, "set_state", QtCore.Qt.ConnectionType.QueuedConnection, QtCore.Q_ARG(str, "talking")
+                ),
+                on_finished=lambda: QtCore.QMetaObject.invokeMethod(
+                    self.character, "set_state", QtCore.Qt.ConnectionType.QueuedConnection, QtCore.Q_ARG(str, "idle")
+                ),
+            )
 
     def _on_thread_finished(self) -> None:
         self._worker_thread = None
         self._worker = None
+
+    def _on_ticker_score_clicked(self, match_id: str, title: str) -> None:
+        self.show_character()
+        self._position_popup_near_character()
+        self.popup.show()
+        self.popup.raise_()
+        q = f"Show me live cricket scores and scorecard for {title}" if title else "Show me live cricket scores"
+        self.send_user_message(q)
+
+    def _on_ticker_dismissed(self) -> None:
+        self._config.cricket_ticker_enabled = False
+        self._config.save()
+        if hasattr(self, "_cricket_timer"):
+            self._cricket_timer.stop()
+
+    def toggle_cricket_ticker(self, enabled: bool) -> None:
+        self._config.cricket_ticker_enabled = enabled
+        self._config.save()
+        if enabled:
+            if hasattr(self, "_cricket_timer") and not self._cricket_timer.isActive():
+                self._cricket_timer.start()
+            self._fetch_cricket_ticker_data()
+        else:
+            if hasattr(self, "_cricket_timer"):
+                self._cricket_timer.stop()
+            if hasattr(self, "cricket_ticker"):
+                self.cricket_ticker.hide()
+
+    def toggle_voice_replies(self, enabled: bool) -> None:
+        self._config.tts_enabled = enabled
+        self._config.save()
+        if hasattr(self, "popup"):
+            self.popup.apply_config(self._config)
+        if not enabled and hasattr(self, "_tts_manager"):
+            self._tts_manager.stop()
+
+    def _on_popup_voice_toggled(self, enabled: bool) -> None:
+        self.toggle_voice_replies(enabled)
+
+    def _fetch_cricket_ticker_data(self) -> None:
+        if not getattr(self._config, "cricket_ticker_enabled", True) or not self.character.isVisible():
+            return
+
+        def _worker():
+            try:
+                data = api_tools.get_live_cricket_ticker_data()
+                QtCore.QMetaObject.invokeMethod(
+                    self.cricket_ticker,
+                    "update_data",
+                    QtCore.Qt.ConnectionType.QueuedConnection,
+                    QtCore.Q_ARG(object, data),
+                )
+                if not self.cricket_ticker.isVisible() and getattr(self._config, "cricket_ticker_enabled", True):
+                    QtCore.QMetaObject.invokeMethod(
+                        self,
+                        "_show_cricket_ticker",
+                        QtCore.Qt.ConnectionType.QueuedConnection,
+                    )
+            except Exception:
+                pass
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    @QtCore.Slot()
+    def _show_cricket_ticker(self) -> None:
+        if not getattr(self._config, "cricket_ticker_enabled", True) or not self.character.isVisible():
+            return
+        self.cricket_ticker.reposition_near(self.character.frameGeometry())
+        self.cricket_ticker.show()
+        self.cricket_ticker.raise_()
 
     def activate_from_second_launch(self) -> None:
         self.show_character()
@@ -7015,6 +7618,12 @@ class DesktopCompanionApp(QtCore.QObject):
         self.popup.focus_input()
 
     def quit_app(self) -> None:
+        if hasattr(self, "_cricket_timer"):
+            self._cricket_timer.stop()
+        if hasattr(self, "cricket_ticker"):
+            self.cricket_ticker.close()
+        if hasattr(self, "_tts_manager"):
+            self._tts_manager.stop()
         if self._startup_wake_timer is not None:
             self._startup_wake_timer.stop()
         self.wakeup_bubble._hide_timer.stop()

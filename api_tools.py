@@ -942,6 +942,120 @@ def _format_cricbuzz_summary(client: httpx.Client, match_list: List[Dict[str, st
     return "\n".join(out)
 
 
+def get_live_cricket_ticker_data(query: str = "") -> Dict[str, Any]:
+    """Fetch structured live cricket match data for the mini floating ticker pill."""
+    clean_q = (query or "").strip().lower()
+    list_url = "https://www.cricbuzz.com/cricket-match/live-scores"
+    fallback: Dict[str, Any] = {
+        "match_id": "",
+        "title": "Cricket Ticker",
+        "score": "No live match right now",
+        "status": "Click to view cricket updates",
+        "state": "Idle",
+        "is_live": False,
+        "series": "",
+    }
+
+    try:
+        with httpx.Client(timeout=4.0, headers=CRICBUZZ_HEADERS) as client:
+            resp = client.get(list_url)
+            resp.raise_for_status()
+            matches: List[Dict[str, str]] = []
+            seen = set()
+            for mid, slug in re.findall(r'href="/live-cricket-scores/(\d+)/([^"]+)"', resp.text):
+                if mid not in seen:
+                    seen.add(mid)
+                    matches.append({"id": mid, "slug": slug, "title": slug.replace("-", " ")})
+
+            if not matches:
+                return fallback
+
+            search_terms = [
+                w for w in re.split(r"[\s,]+", clean_q)
+                if w and w not in ("cricket", "live", "score", "scores", "match", "updates", "today")
+            ]
+            candidates = list(matches[:6])
+            if search_terms:
+                candidates.sort(
+                    key=lambda m: sum(2 if term in m["slug"].lower() else 0 for term in search_terms),
+                    reverse=True,
+                )
+
+            best_live: Optional[Dict[str, Any]] = None
+            best_any: Optional[Dict[str, Any]] = None
+
+            for m in candidates:
+                mid = m["id"]
+                try:
+                    c_resp = client.get(f"https://www.cricbuzz.com/api/mcenter/comm/{mid}")
+                    if c_resp.status_code != 200:
+                        continue
+                    data = c_resp.json()
+                    hdr = data.get("matchHeader", {})
+                    mini = data.get("miniscore", {})
+
+                    t1 = (
+                        hdr.get("team1", {}).get("shortName")
+                        or hdr.get("team1", {}).get("name")
+                        or "Team 1"
+                    )
+                    t2 = (
+                        hdr.get("team2", {}).get("shortName")
+                        or hdr.get("team2", {}).get("name")
+                        or "Team 2"
+                    )
+                    title = f"{t1} vs {t2}"
+                    state = str(hdr.get("state") or "").strip()
+                    status = str(mini.get("status") or hdr.get("status") or "").strip()
+                    series = str(hdr.get("seriesName") or hdr.get("seriesDesc") or "").strip()
+
+                    innings = mini.get("matchScoreDetails", {}).get("inningsScoreList") or []
+                    score_parts = []
+                    for inn in innings:
+                        bat_tm = inn.get("batTeamShortName") or inn.get("batTeamName") or ""
+                        sc = inn.get("score", 0)
+                        wk = inn.get("wickets", 0)
+                        ov = inn.get("overs", 0)
+                        score_parts.append(f"{bat_tm} {sc}/{wk} ({ov} ov)".strip())
+
+                    score_str = " · ".join(score_parts) if score_parts else "Yet to bat"
+
+                    bat = mini.get("batsmanStriker") or {}
+                    bat_name = bat.get("name") or bat.get("batName")
+                    if bat_name:
+                        b_runs = bat.get("runs") if bat.get("runs") is not None else bat.get("batRuns", 0)
+                        b_balls = bat.get("balls") if bat.get("balls") is not None else bat.get("batBalls", 0)
+                        bat_info = f"{bat_name} {b_runs}*({b_balls})"
+                        status = f"{bat_info} · {status}" if status else bat_info
+
+                    is_live = (
+                        state.lower() in ("inprogress", "live", "in progress")
+                        or any(kw in status.lower() for kw in ("opt to", "trail by", "lead by", "need", "innings break"))
+                    )
+
+                    entry = {
+                        "match_id": str(mid),
+                        "title": title,
+                        "score": score_str,
+                        "status": status[:90],
+                        "state": state.title() or ("Live" if is_live else "Match"),
+                        "is_live": is_live,
+                        "series": series[:50],
+                    }
+
+                    if is_live:
+                        best_live = entry
+                        break
+                    if best_any is None:
+                        best_any = entry
+                except Exception:
+                    continue
+
+            return best_live or best_any or fallback
+    except Exception:
+        return fallback
+
+
 # ============================================================
 # 4. MAPS API (Google Maps if key set + OpenStreetMap fallback)
 # ============================================================

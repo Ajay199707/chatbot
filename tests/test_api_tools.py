@@ -820,3 +820,11 @@ def test_get_live_cricket_scores_mocked_scorecard_and_summary(monkeypatch: pytes
     res_exec = api_tools.execute_api_tool("get_live_cricket_scores", {"query": "aus"})
     assert "### 🏏 Australia vs England" in res_exec
 
+    # 5. Live cricket ticker structured data
+    ticker = api_tools.get_live_cricket_ticker_data(query="aus")
+    assert ticker["match_id"] == "151334"
+    assert "Australia" in ticker["title"] or "AUS" in ticker["title"]
+    assert "ENG 328/10" in ticker["score"]
+    assert ticker["is_live"] is True
+
+

@@ -1476,6 +1476,87 @@ def test_cricket_topic_prompt_and_briefing_summary(monkeypatch):
     assert "AUS vs ENG" in summary or "Live Cricket" in summary
 
 
+def test_clean_text_for_speech():
+    sample = "Hello! Check [link](https://example.com) and ```python\ncode()\n``` with | Table | Cell | and **bold** text."
+    cleaned = dc.clean_text_for_speech(sample)
+    assert "https://" not in cleaned
+    assert "```" not in cleaned
+    assert "Code snippet provided in chat." in cleaned
+    assert "| Table |" not in cleaned
+    assert "link" in cleaned
+    assert "bold" in cleaned
+
+
+def test_character_voice_profiles():
+    assert "lumi" in dc.CHARACTER_VOICE_PROFILES
+    assert "ben_tennyson" in dc.CHARACTER_VOICE_PROFILES
+    assert "heatblast" in dc.CHARACTER_VOICE_PROFILES
+    assert "gwen_classic" in dc.CHARACTER_VOICE_PROFILES
+
+    assert dc.CHARACTER_VOICE_PROFILES["lumi"]["voice"] == "en-US-AnaNeural"
+    assert dc.CHARACTER_VOICE_PROFILES["ben_tennyson"]["voice"] == "en-US-GuyNeural"
+    assert dc.CHARACTER_VOICE_PROFILES["heatblast"]["voice"] == "en-US-EricNeural"
+    assert dc.CHARACTER_VOICE_PROFILES["gwen_classic"]["voice"] == "en-US-JennyNeural"
+
+
+def test_cricket_ticker_widget_creation_and_update():
+    _get_qapp()
+    ticker = dc.CricketTickerWidget("Lumi")
+    try:
+        assert ticker._title_lbl is not None
+        assert ticker._score_lbl is not None
+        assert ticker._status_lbl is not None
+
+        data = {
+            "match_id": "12345",
+            "title": "IND vs AUS",
+            "score": "IND 280/4 (45 ov)",
+            "status": "In Progress · Kohli 80*",
+            "state": "In Progress",
+            "is_live": True,
+        }
+        ticker.update_data(data)
+        assert "IND vs AUS" in ticker._title_lbl.text()
+        assert "IND 280/4" in ticker._score_lbl.text()
+        assert "Kohli 80*" in ticker._status_lbl.text()
+        assert ticker._match_id == "12345"
+
+        received = []
+        ticker.score_clicked.connect(lambda mid, title: received.append((mid, title)))
+        event = QtGui.QMouseEvent(
+            QtCore.QEvent.Type.MouseButtonRelease,
+            QtCore.QPointF(10, 10),
+            QtCore.Qt.MouseButton.LeftButton,
+            QtCore.Qt.MouseButton.LeftButton,
+            QtCore.Qt.KeyboardModifier.NoModifier,
+        )
+        ticker.mouseReleaseEvent(event)
+        assert len(received) == 1
+        assert received[0] == ("12345", "IND vs AUS")
+    finally:
+        ticker.deleteLater()
+
+
+def test_chat_popup_voice_toggle_button():
+    _get_qapp()
+    cfg = dc.CharacterConfig(tts_enabled=True)
+    popup = dc.ChatPopupWindow(cfg)
+    try:
+        assert hasattr(popup, "_voice_btn")
+        assert popup._voice_btn.isChecked() is True
+        assert popup._voice_btn.text() == "🔊"
+
+        toggled = []
+        popup.voice_toggled.connect(lambda val: toggled.append(val))
+        popup._voice_btn.toggle()
+        assert popup._voice_btn.isChecked() is False
+        assert popup._voice_btn.text() == "🔇"
+        assert toggled == [False]
+    finally:
+        popup.deleteLater()
+
+
+
 
 
 
