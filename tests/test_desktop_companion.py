@@ -1556,6 +1556,40 @@ def test_chat_popup_voice_toggle_button():
         popup.deleteLater()
 
 
+def test_companion_cricket_ticker_data_and_toggle():
+    app = _get_qapp()
+    cfg = dc.CharacterConfig(cricket_ticker_enabled=True)
+    companion = dc.DesktopCompanionApp(app, cfg)
+    try:
+        companion.show_character()
+        assert companion.cricket_ticker.isVisible() is True
+
+        # Test emitting data update through signal
+        test_data = {
+            "match_id": "9999",
+            "title": "IND vs ENG",
+            "score": "IND 150/2 (18 ov)",
+            "status": "Rohit 75*",
+            "is_live": True,
+        }
+        companion._cricket_ticker_data_ready.emit(test_data)
+        app.processEvents()
+
+        assert "IND vs ENG" in companion.cricket_ticker._title_lbl.text()
+        assert "IND 150/2" in companion.cricket_ticker._score_lbl.text()
+
+        # Test toggle off
+        companion.toggle_cricket_ticker(False)
+        assert companion.cricket_ticker.isVisible() is False
+
+        # Test toggle on
+        companion.toggle_cricket_ticker(True)
+        assert companion.cricket_ticker.isVisible() is True
+    finally:
+        companion.quit_app()
+
+
+
 
 
 

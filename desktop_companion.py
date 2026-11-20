@@ -2604,15 +2604,27 @@ class CricketTickerWidget(QtWidgets.QWidget):
         self._status_lbl.setText(status)
         self.adjustSize()
 
-    def reposition_near(self, char_geo: QtCore.QRect) -> None:
+    def reposition_near(self, char_geo: QtCore.QRect, popup_geo: Optional[QtCore.QRect] = None) -> None:
         screen = QtGui.QGuiApplication.screenAt(char_geo.center()) or QtGui.QGuiApplication.primaryScreen()
         avail = screen.availableGeometry() if screen else QtCore.QRect(0, 0, 1280, 720)
-        tw = max(self.width(), self.sizeHint().width(), 260)
+        tw = max(self.width(), self.sizeHint().width(), 265)
         th = max(self.height(), self.sizeHint().height(), 60)
 
-        bx = char_geo.center().x() - tw // 2
+        # Default: docked above the character
         by = char_geo.top() - th - 8
+        bx = char_geo.center().x() - tw // 2
 
+        # If chat popup is open on the left, shift ticker to align with character's left or right
+        if popup_geo and popup_geo.isValid():
+            ticker_test = QtCore.QRect(bx, by, tw, th)
+            if ticker_test.intersects(popup_geo):
+                cand_x = popup_geo.right() + 8
+                if cand_x + tw <= avail.right() - 8:
+                    bx = cand_x
+                elif char_geo.left() - tw - 8 >= avail.left() + 8 and not popup_geo.intersects(QtCore.QRect(char_geo.left() - tw - 8, by, tw, th)):
+                    bx = char_geo.left() - tw - 8
+
+        # If ticker goes above screen top, place it beside character
         if by < avail.top() + 8:
             by = char_geo.top()
             if char_geo.center().x() > avail.center().x():
@@ -2628,9 +2640,30 @@ class CricketTickerWidget(QtWidgets.QWidget):
         self.hide()
         self.dismissed.emit()
 
+    def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:  # noqa: N802
+        if event.button() == QtCore.Qt.MouseButton.LeftButton:
+            self._drag_start_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            self._dragged = False
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QtGui.QMouseEvent) -> None:  # noqa: N802
+        if (event.buttons() & QtCore.Qt.MouseButton.LeftButton) and hasattr(self, "_drag_start_pos"):
+            delta = event.globalPosition().toPoint() - self._drag_start_pos - self.frameGeometry().topLeft()
+            if delta.manhattanLength() > 3:
+                self._dragged = True
+                new_pos = event.globalPosition().toPoint() - self._drag_start_pos
+                self.move(new_pos)
+                event.accept()
+                return
+        super().mouseMoveEvent(event)
+
     def mouseReleaseEvent(self, event: QtGui.QMouseEvent) -> None:  # noqa: N802
         if event.button() == QtCore.Qt.MouseButton.LeftButton:
-            self.score_clicked.emit(self._match_id, self._title)
+            if not getattr(self, "_dragged", False):
+                self.score_clicked.emit(self._match_id, self._title)
+            self._dragged = False
             event.accept()
             return
         super().mouseReleaseEvent(event)
@@ -6595,6 +6628,7 @@ class TasksDialog(QtWidgets.QDialog):
 class DesktopCompanionApp(QtCore.QObject):
     _confirm_requested = QtCore.Signal(str, str, str, object, object)
     _clipboard_requested = QtCore.Signal(str, str, object, object, object)
+    _cricket_ticker_data_ready = QtCore.Signal(dict)
 
     def __init__(self, app: QtWidgets.QApplication, config: CharacterConfig):
         super().__init__()
@@ -6616,6 +6650,9 @@ class DesktopCompanionApp(QtCore.QObject):
         )
         self._clipboard_requested.connect(
             self._on_clipboard_requested, QtCore.Qt.ConnectionType.QueuedConnection
+        )
+        self._cricket_ticker_data_ready.connect(
+            self._on_cricket_ticker_data_ready, QtCore.Qt.ConnectionType.QueuedConnection
         )
 
         self._bot = chatbot.Chatbot(
@@ -6705,7 +6742,8 @@ class DesktopCompanionApp(QtCore.QObject):
         self._cricket_timer.timeout.connect(self._fetch_cricket_ticker_data)
         if getattr(config, "cricket_ticker_enabled", True):
             self._cricket_timer.start()
-            QtCore.QTimer.singleShot(2500, self._fetch_cricket_ticker_data)
+            QtCore.QTimer.singleShot(1000, self._show_cricket_ticker)
+            QtCore.QTimer.singleShot(1500, self._fetch_cricket_ticker_data)
 
         # 1-second background timer checking for Pomodoro ticks, due alarms and reminders
         self._reminder_timer = QtCore.QTimer(self.character)
@@ -6771,6 +6809,8 @@ class DesktopCompanionApp(QtCore.QObject):
 
     def start(self, startup_launch: bool = False) -> None:
         self.character.show()
+        if getattr(self._config, "cricket_ticker_enabled", True) and hasattr(self, "cricket_ticker"):
+            self._show_cricket_ticker()
         if self._config.wake_greeting_enabled:
             delay_ms = 2500 if startup_launch else 150
             self._startup_wake_timer = QtCore.QTimer(self)
@@ -6808,7 +6848,8 @@ class DesktopCompanionApp(QtCore.QObject):
         if self.wakeup_bubble.isVisible():
             self.wakeup_bubble.reposition_near(self.character.frameGeometry())
         if hasattr(self, "cricket_ticker") and self.cricket_ticker.isVisible():
-            self.cricket_ticker.reposition_near(self.character.frameGeometry())
+            p_geo = self.popup.frameGeometry() if self.popup.isVisible() else None
+            self.cricket_ticker.reposition_near(self.character.frameGeometry(), popup_geo=p_geo)
 
     def _on_character_moved(self, x: int, y: int) -> None:
         self._config.window_pos = [x, y]
@@ -6818,7 +6859,8 @@ class DesktopCompanionApp(QtCore.QObject):
         if self.wakeup_bubble.isVisible():
             self.wakeup_bubble.reposition_near(self.character.frameGeometry())
         if hasattr(self, "cricket_ticker") and self.cricket_ticker.isVisible():
-            self.cricket_ticker.reposition_near(self.character.frameGeometry())
+            p_geo = self.popup.frameGeometry() if self.popup.isVisible() else None
+            self.cricket_ticker.reposition_near(self.character.frameGeometry(), popup_geo=p_geo)
 
     def _position_popup_near_character(self) -> None:
         char_geo = self.character.frameGeometry()
@@ -6847,14 +6889,20 @@ class DesktopCompanionApp(QtCore.QObject):
             py = avail.bottom() - ph - 8
 
         self.popup.move(px, py)
+        if hasattr(self, "cricket_ticker") and self.cricket_ticker.isVisible():
+            self.cricket_ticker.reposition_near(char_geo, popup_geo=self.popup.frameGeometry())
 
     def show_character(self) -> None:
         self.character.show()
         self.character.raise_()
+        if getattr(self._config, "cricket_ticker_enabled", True) and hasattr(self, "cricket_ticker"):
+            self._show_cricket_ticker()
 
     def hide_character(self) -> None:
         self.wakeup_bubble.hide()
         self.popup.hide()
+        if hasattr(self, "cricket_ticker"):
+            self.cricket_ticker.hide()
         self.character.hide()
         self._tray.showMessage(
             self._config.character_name,
@@ -7561,6 +7609,7 @@ class DesktopCompanionApp(QtCore.QObject):
         if enabled:
             if hasattr(self, "_cricket_timer") and not self._cricket_timer.isActive():
                 self._cricket_timer.start()
+            self._show_cricket_ticker()
             self._fetch_cricket_ticker_data()
         else:
             if hasattr(self, "_cricket_timer"):
@@ -7579,6 +7628,15 @@ class DesktopCompanionApp(QtCore.QObject):
     def _on_popup_voice_toggled(self, enabled: bool) -> None:
         self.toggle_voice_replies(enabled)
 
+    @QtCore.Slot(dict)
+    def _on_cricket_ticker_data_ready(self, data: dict) -> None:
+        if not getattr(self._config, "cricket_ticker_enabled", True):
+            return
+        if hasattr(self, "cricket_ticker"):
+            self.cricket_ticker.update_data(data)
+            if not self.cricket_ticker.isVisible() and self.character.isVisible():
+                self._show_cricket_ticker()
+
     def _fetch_cricket_ticker_data(self) -> None:
         if not getattr(self._config, "cricket_ticker_enabled", True) or not self.character.isVisible():
             return
@@ -7586,18 +7644,8 @@ class DesktopCompanionApp(QtCore.QObject):
         def _worker():
             try:
                 data = api_tools.get_live_cricket_ticker_data()
-                QtCore.QMetaObject.invokeMethod(
-                    self.cricket_ticker,
-                    "update_data",
-                    QtCore.Qt.ConnectionType.QueuedConnection,
-                    QtCore.Q_ARG(object, data),
-                )
-                if not self.cricket_ticker.isVisible() and getattr(self._config, "cricket_ticker_enabled", True):
-                    QtCore.QMetaObject.invokeMethod(
-                        self,
-                        "_show_cricket_ticker",
-                        QtCore.Qt.ConnectionType.QueuedConnection,
-                    )
+                if data:
+                    self._cricket_ticker_data_ready.emit(data)
             except Exception:
                 pass
 
@@ -7607,7 +7655,8 @@ class DesktopCompanionApp(QtCore.QObject):
     def _show_cricket_ticker(self) -> None:
         if not getattr(self._config, "cricket_ticker_enabled", True) or not self.character.isVisible():
             return
-        self.cricket_ticker.reposition_near(self.character.frameGeometry())
+        p_geo = self.popup.frameGeometry() if (hasattr(self, "popup") and self.popup.isVisible()) else None
+        self.cricket_ticker.reposition_near(self.character.frameGeometry(), popup_geo=p_geo)
         self.cricket_ticker.show()
         self.cricket_ticker.raise_()
 
