@@ -1564,19 +1564,50 @@ def test_companion_cricket_ticker_data_and_toggle():
         companion.show_character()
         assert companion.cricket_ticker.isVisible() is True
 
-        # Test emitting data update through signal
+        # Test emitting data update through signal with multiple matches
         test_data = {
             "match_id": "9999",
             "title": "IND vs ENG",
             "score": "IND 150/2 (18 ov)",
             "status": "Rohit 75*",
             "is_live": True,
+            "available_matches": [
+                {
+                    "match_id": "9999",
+                    "title": "IND vs ENG",
+                    "score": "IND 150/2 (18 ov)",
+                    "status": "Rohit 75*",
+                    "is_live": True,
+                },
+                {
+                    "match_id": "8888",
+                    "title": "AUS vs SA",
+                    "score": "AUS 220/4 (35 ov)",
+                    "status": "Smith 88*",
+                    "is_live": True,
+                },
+            ],
+            "total_matches": 2,
+            "current_index": 0,
         }
         companion._cricket_ticker_data_ready.emit(test_data)
         app.processEvents()
 
         assert "IND vs ENG" in companion.cricket_ticker._title_lbl.text()
         assert "IND 150/2" in companion.cricket_ticker._score_lbl.text()
+        assert companion.cricket_ticker._idx_lbl.text() == "1/2"
+
+        # Test switching to next match
+        companion.cricket_ticker._select_next_match()
+        assert "AUS vs SA" in companion.cricket_ticker._title_lbl.text()
+        assert "AUS 220/4" in companion.cricket_ticker._score_lbl.text()
+        assert companion.cricket_ticker._match_id == "8888"
+        assert companion.cricket_ticker._idx_lbl.text() == "2/2"
+
+        # Test switching to previous match
+        companion.cricket_ticker._select_previous_match()
+        assert "IND vs ENG" in companion.cricket_ticker._title_lbl.text()
+        assert companion.cricket_ticker._match_id == "9999"
 
         # Test toggle off
         companion.toggle_cricket_ticker(False)

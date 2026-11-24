@@ -760,9 +760,10 @@ def get_live_cricket_scores(query: str = "") -> str:
 
     try:
         with httpx.Client(timeout=HTTP_TIMEOUT, headers=CRICBUZZ_HEADERS) as client:
-            # If a direct numeric match ID was provided, fetch that match directly
-            if clean_q.isdigit():
-                return _format_cricbuzz_scorecard(client, clean_q)
+            # If a direct numeric match ID is provided or mentioned in query, fetch that match directly
+            id_match = re.search(r"\b(\d{5,7})\b", clean_q)
+            if id_match:
+                return _format_cricbuzz_scorecard(client, id_match.group(1))
 
             resp = client.get(list_url)
             resp.raise_for_status()
@@ -932,32 +933,40 @@ def _format_cricbuzz_summary(client: httpx.Client, match_list: List[Dict[str, st
                 )
             score_str = " · ".join(score_parts) if score_parts else "Yet to bat"
 
-            out.append(f"**{title}**" + (f" ({desc})" if desc else ""))
+            out.append(f"**{title}**" + (f" ({desc})" if desc else "") + f" — `Match ID: {mid}`")
             if series:
                 out.append(f"- *Series:* {series}")
             out.append(f"- *Score:* {score_str}")
             out.append(f"- *Status:* {status}\n")
         except Exception:
-            out.append(f"**{m['title']}**\n- *Match ID:* {mid}\n")
+            out.append(f"**{m['title']}** — `Match ID: {mid}`\n")
+    out.append("*Tip: You can ask for full scorecard for any specific match above by team name or Match ID.*")
     return "\n".join(out)
 
 
-def get_live_cricket_ticker_data(query: str = "") -> Dict[str, Any]:
-    """Fetch structured live cricket match data for the mini floating ticker pill."""
+def get_live_cricket_ticker_data(query: str = "", match_id: str = "") -> Dict[str, Any]:
+    """Fetch structured live cricket match data for the mini floating ticker pill.
+    Supports selecting/pinning a specific match_id or preferred team query.
+    Returns active match details along with an available_matches list for easy switching.
+    """
     clean_q = (query or "").strip().lower()
+    pinned_id = str(match_id or "").strip()
     list_url = "https://www.cricbuzz.com/cricket-match/live-scores"
     fallback: Dict[str, Any] = {
-        "match_id": "",
+        "match_id": pinned_id,
         "title": "Cricket Ticker",
         "score": "No live match right now",
-        "status": "Click to view cricket updates",
+        "status": "Click or cycle (‹ / ›) to view matches",
         "state": "Idle",
         "is_live": False,
         "series": "",
+        "available_matches": [],
+        "current_index": 0,
+        "total_matches": 0,
     }
 
     try:
-        with httpx.Client(timeout=4.0, headers=CRICBUZZ_HEADERS) as client:
+        with httpx.Client(timeout=4.5, headers=CRICBUZZ_HEADERS) as client:
             resp = client.get(list_url)
             resp.raise_for_status()
             matches: List[Dict[str, str]] = []
@@ -967,24 +976,38 @@ def get_live_cricket_ticker_data(query: str = "") -> Dict[str, Any]:
                     seen.add(mid)
                     matches.append({"id": mid, "slug": slug, "title": slug.replace("-", " ")})
 
-            if not matches:
+            if not matches and not pinned_id:
                 return fallback
 
             search_terms = [
                 w for w in re.split(r"[\s,]+", clean_q)
                 if w and w not in ("cricket", "live", "score", "scores", "match", "updates", "today")
             ]
-            candidates = list(matches[:6])
-            if search_terms:
-                candidates.sort(
+
+            # Build candidates list: if user pinned a match_id, ensure it is candidate #1
+            candidate_mids = []
+            seen_cands = set()
+            if pinned_id:
+                candidate_mids.append({"id": pinned_id, "slug": "", "title": "Pinned Match"})
+                seen_cands.add(pinned_id)
+
+            candidates_pool = list(matches)
+            if search_terms and not pinned_id:
+                candidates_pool.sort(
                     key=lambda m: sum(2 if term in m["slug"].lower() else 0 for term in search_terms),
                     reverse=True,
                 )
 
-            best_live: Optional[Dict[str, Any]] = None
-            best_any: Optional[Dict[str, Any]] = None
+            for m in candidates_pool:
+                if m["id"] not in seen_cands:
+                    seen_cands.add(m["id"])
+                    candidate_mids.append(m)
+                if len(candidate_mids) >= 8:
+                    break
 
-            for m in candidates:
+            all_entries: List[Dict[str, Any]] = []
+
+            for m in candidate_mids:
                 mid = m["id"]
                 try:
                     c_resp = client.get(f"https://www.cricbuzz.com/api/mcenter/comm/{mid}")
@@ -1033,7 +1056,7 @@ def get_live_cricket_ticker_data(query: str = "") -> Dict[str, Any]:
                         or any(kw in status.lower() for kw in ("opt to", "trail by", "lead by", "need", "innings break"))
                     )
 
-                    entry = {
+                    all_entries.append({
                         "match_id": str(mid),
                         "title": title,
                         "score": score_str,
@@ -1041,18 +1064,39 @@ def get_live_cricket_ticker_data(query: str = "") -> Dict[str, Any]:
                         "state": state.title() or ("Live" if is_live else "Match"),
                         "is_live": is_live,
                         "series": series[:50],
-                    }
-
-                    if is_live:
-                        best_live = entry
-                        break
-                    if best_any is None:
-                        best_any = entry
+                    })
                 except Exception:
                     continue
 
-            return best_live or best_any or fallback
+            if not all_entries:
+                return fallback
+
+            # Decide which match to present initially:
+            # 1. Pinned match_id if requested
+            # 2. Team search match if query provided
+            # 3. First live match
+            # 4. Otherwise first candidate
+            selected_idx = 0
+            if pinned_id:
+                for idx, e in enumerate(all_entries):
+                    if e["match_id"] == pinned_id:
+                        selected_idx = idx
+                        break
+            elif search_terms:
+                selected_idx = 0
+            else:
+                for idx, e in enumerate(all_entries):
+                    if e.get("is_live"):
+                        selected_idx = idx
+                        break
+
+            chosen = dict(all_entries[selected_idx])
+            chosen["available_matches"] = all_entries
+            chosen["current_index"] = selected_idx
+            chosen["total_matches"] = len(all_entries)
+            return chosen
     except Exception:
+        return fallback
         return fallback
 
 

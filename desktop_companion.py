@@ -894,6 +894,8 @@ class CharacterConfig:
     tts_enabled: bool = True
     tts_voice: str = "auto"
     cricket_ticker_enabled: bool = True
+    cricket_ticker_match_id: str = ""
+    cricket_ticker_team_filter: str = ""
 
     @classmethod
     def load(cls, path: Path = CONFIG_FILE) -> "CharacterConfig":
@@ -939,6 +941,8 @@ class CharacterConfig:
             cfg.tts_enabled = bool(getattr(cfg, "tts_enabled", True))
             cfg.tts_voice = str(getattr(cfg, "tts_voice", "auto") or "auto").strip()
             cfg.cricket_ticker_enabled = bool(getattr(cfg, "cricket_ticker_enabled", True))
+            cfg.cricket_ticker_match_id = str(getattr(cfg, "cricket_ticker_match_id", "") or "").strip()
+            cfg.cricket_ticker_team_filter = str(getattr(cfg, "cricket_ticker_team_filter", "") or "").strip()
             return cfg
         except Exception:
             return cls()
@@ -2474,11 +2478,15 @@ class WakeupBubbleWidget(QtWidgets.QWidget):
 
 
 class CricketTickerWidget(QtWidgets.QWidget):
-    """Compact docked floating pill showing real-time live cricket scores beside the companion."""
+    """Compact docked floating pill showing real-time live cricket scores beside the companion.
+    Supports cycling through active matches (‹ / ›) and picking specific matches from a dropdown menu.
+    """
 
     score_clicked = QtCore.Signal(str, str)  # (match_id, title)
     refresh_requested = QtCore.Signal()
     dismissed = QtCore.Signal()
+    match_selected = QtCore.Signal(str, str)  # (match_id, title)
+    view_all_requested = QtCore.Signal()
 
     def __init__(self, character_name: str = "Lumi", theme: Optional[UITheme] = None):
         super().__init__(
@@ -2494,22 +2502,24 @@ class CricketTickerWidget(QtWidgets.QWidget):
         self._match_id = ""
         self._title = "Live Cricket"
         self._accent = theme.accent_color if theme else "#38bdf8"
+        self._available_matches: List[Dict[str, Any]] = []
+        self._current_index: int = 0
 
         outer = QtWidgets.QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
 
         self._card = QtWidgets.QFrame()
         self._card.setObjectName("cricketTickerCard")
-        self._card.setFixedWidth(275)
+        self._card.setFixedWidth(295)
         outer.addWidget(self._card)
 
         col = QtWidgets.QVBoxLayout(self._card)
         col.setContentsMargins(10, 7, 10, 8)
         col.setSpacing(3)
 
-        # Header: Live badge, Title, Refresh, Close
+        # Header: Live badge, Title, Match Selector, Prev, Index, Next, Refresh, Close
         top = QtWidgets.QHBoxLayout()
-        top.setSpacing(6)
+        top.setSpacing(4)
 
         self._live_badge = QtWidgets.QLabel("● LIVE")
         self._live_badge.setStyleSheet(
@@ -2521,23 +2531,48 @@ class CricketTickerWidget(QtWidgets.QWidget):
         self._title_lbl.setStyleSheet("font-size:11.5px;font-weight:700;color:#f8fafc;")
         top.addWidget(self._title_lbl, 1)
 
+        # Match dropdown selector button
+        self._menu_btn = QtWidgets.QPushButton("▾")
+        self._menu_btn.setFixedSize(16, 16)
+        self._menu_btn.setToolTip("Select active cricket match...")
+        self._menu_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        self._menu_btn.clicked.connect(self._show_match_picker_menu)
+        top.addWidget(self._menu_btn)
+
+        # Prev match button
+        self._prev_btn = QtWidgets.QPushButton("‹")
+        self._prev_btn.setFixedSize(15, 16)
+        self._prev_btn.setToolTip("Previous active match")
+        self._prev_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        self._prev_btn.clicked.connect(self._select_previous_match)
+        top.addWidget(self._prev_btn)
+
+        # Match index counter (e.g. 1/3)
+        self._idx_lbl = QtWidgets.QLabel("")
+        self._idx_lbl.setStyleSheet("font-size:9px;font-weight:700;color:#94a3b8;")
+        top.addWidget(self._idx_lbl)
+
+        # Next match button
+        self._next_btn = QtWidgets.QPushButton("›")
+        self._next_btn.setFixedSize(15, 16)
+        self._next_btn.setToolTip("Next active match")
+        self._next_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        self._next_btn.clicked.connect(self._select_next_match)
+        top.addWidget(self._next_btn)
+
+        # Refresh button
         self._refresh_btn = QtWidgets.QPushButton("🔄")
-        self._refresh_btn.setFixedSize(18, 18)
+        self._refresh_btn.setFixedSize(16, 16)
         self._refresh_btn.setToolTip("Refresh Live Score")
         self._refresh_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
-        self._refresh_btn.setStyleSheet(
-            "background:transparent;color:#94a3b8;border:none;font-size:11px;padding:0;"
-        )
         self._refresh_btn.clicked.connect(self.refresh_requested.emit)
         top.addWidget(self._refresh_btn)
 
+        # Close button
         self._close_btn = QtWidgets.QPushButton("×")
-        self._close_btn.setFixedSize(18, 18)
+        self._close_btn.setFixedSize(16, 16)
         self._close_btn.setToolTip("Dismiss Ticker")
         self._close_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
-        self._close_btn.setStyleSheet(
-            "background:transparent;color:#94a3b8;border:none;font-size:13px;font-weight:700;padding:0;"
-        )
         self._close_btn.clicked.connect(self.dismiss_ticker)
         top.addWidget(self._close_btn)
         col.addLayout(top)
@@ -2564,6 +2599,18 @@ class CricketTickerWidget(QtWidgets.QWidget):
                 border-radius: 12px;
             }}
             QLabel {{ background: transparent; border: none; }}
+            QPushButton {{
+                background: transparent;
+                color: #94a3b8;
+                border: none;
+                font-weight: 700;
+                padding: 0;
+            }}
+            QPushButton:hover {{
+                color: #ffffff;
+                background: rgba(255, 255, 255, 0.12);
+                border-radius: 3px;
+            }}
             """
         )
         self._score_lbl.setStyleSheet(f"font-size:13px;font-weight:700;color:{self._accent};")
@@ -2573,16 +2620,24 @@ class CricketTickerWidget(QtWidgets.QWidget):
             self._accent = theme.accent_color
             self._apply_style()
 
-    @QtCore.Slot(object)
-    def update_data(self, data: Dict[str, Any]) -> None:
-        if not data:
+    def _render_current_match(self) -> None:
+        if not self._available_matches:
+            self._idx_lbl.setText("")
+            self._prev_btn.hide()
+            self._next_btn.hide()
             return
-        self._match_id = str(data.get("match_id") or "")
-        title = data.get("title") or "Cricket Match"
-        self._title = title
-        self._title_lbl.setText(f"🏏 {title[:22]}")
 
-        is_live = bool(data.get("is_live", False))
+        total = len(self._available_matches)
+        if self._current_index < 0 or self._current_index >= total:
+            self._current_index = 0
+
+        cur = self._available_matches[self._current_index]
+        self._match_id = str(cur.get("match_id") or "")
+        title = cur.get("title") or "Cricket Match"
+        self._title = title
+        self._title_lbl.setText(f"🏏 {title[:18]}")
+
+        is_live = bool(cur.get("is_live", False))
         if is_live:
             self._live_badge.setText("● LIVE")
             self._live_badge.setStyleSheet(
@@ -2590,19 +2645,139 @@ class CricketTickerWidget(QtWidgets.QWidget):
             )
             self._live_badge.show()
         else:
-            state = data.get("state") or "Result"
-            self._live_badge.setText(state.upper()[:8])
+            state = cur.get("state") or "Result"
+            self._live_badge.setText(state.upper()[:7])
             self._live_badge.setStyleSheet(
                 "background:#334155;color:#94a3b8;border-radius:4px;padding:1px 5px;font-weight:700;font-size:9px;"
             )
             self._live_badge.show()
 
-        score = data.get("score") or "Score unavailable"
+        score = cur.get("score") or "Score unavailable"
         self._score_lbl.setText(score)
 
-        status = data.get("status") or ""
+        status = cur.get("status") or ""
         self._status_lbl.setText(status)
+
+        if total > 1:
+            self._idx_lbl.setText(f"{self._current_index + 1}/{total}")
+            self._idx_lbl.show()
+            self._prev_btn.show()
+            self._next_btn.show()
+        else:
+            self._idx_lbl.hide()
+            self._prev_btn.hide()
+            self._next_btn.hide()
+
         self.adjustSize()
+
+    def _select_previous_match(self) -> None:
+        if self._available_matches:
+            self._current_index = (self._current_index - 1) % len(self._available_matches)
+            self._render_current_match()
+            self.match_selected.emit(self._match_id, self._title)
+
+    def _select_next_match(self) -> None:
+        if self._available_matches:
+            self._current_index = (self._current_index + 1) % len(self._available_matches)
+            self._render_current_match()
+            self.match_selected.emit(self._match_id, self._title)
+
+    def switch_to_match_id(self, match_id: str) -> None:
+        if not match_id:
+            self._match_id = ""
+            self.match_selected.emit("", "")
+            return
+
+        for idx, m in enumerate(self._available_matches):
+            if m.get("match_id") == match_id:
+                self._current_index = idx
+                self._render_current_match()
+                self.match_selected.emit(self._match_id, self._title)
+                return
+
+        self._match_id = match_id
+        self.match_selected.emit(self._match_id, self._title)
+
+    def _show_match_picker_menu(self) -> None:
+        menu = QtWidgets.QMenu(self)
+        menu.setStyleSheet(
+            f"""
+            QMenu {{
+                background-color: #0f172a;
+                color: #f8fafc;
+                border: 1px solid {self._accent};
+                border-radius: 8px;
+                padding: 4px;
+                font-size: 11px;
+            }}
+            QMenu::item {{
+                padding: 5px 12px;
+                border-radius: 4px;
+            }}
+            QMenu::item:selected {{
+                background-color: {self._accent}33;
+                color: #ffffff;
+            }}
+            QMenu::separator {{
+                height: 1px;
+                background: #334155;
+                margin: 4px 6px;
+            }}
+            """
+        )
+
+        if self._available_matches:
+            for idx, m in enumerate(self._available_matches):
+                dot = "● " if m.get("is_live") else "○ "
+                sc = f" ({m.get('score', '')[:16]})" if m.get("score") and m.get("score") != "Yet to bat" else ""
+                act = menu.addAction(f"{dot}{m.get('title')}{sc}")
+                act.setCheckable(True)
+                act.setChecked(m.get("match_id") == self._match_id)
+                act.triggered.connect(lambda _=False, mid=m.get("match_id"): self.switch_to_match_id(mid))
+            menu.addSeparator()
+
+        act_auto = menu.addAction("🔄 Auto-track Top Live Match")
+        act_auto.triggered.connect(lambda: self.switch_to_match_id(""))
+
+        act_all = menu.addAction("🌐 View All Matches in Chat...")
+        act_all.triggered.connect(self.view_all_requested.emit)
+
+        menu.addSeparator()
+        act_dismiss = menu.addAction("✕ Dismiss Ticker")
+        act_dismiss.triggered.connect(self.dismiss_ticker)
+
+        menu.exec(self._menu_btn.mapToGlobal(QtCore.QPoint(0, self._menu_btn.height() + 2)))
+
+    def contextMenuEvent(self, event: QtGui.QContextMenuEvent) -> None:  # noqa: N802
+        self._show_match_picker_menu()
+        event.accept()
+
+    @QtCore.Slot(object)
+    def update_data(self, data: Dict[str, Any]) -> None:
+        if not data:
+            return
+
+        matches = data.get("available_matches") or []
+        if not matches and data.get("match_id"):
+            matches = [data]
+        self._available_matches = matches
+
+        target_mid = self._match_id or data.get("match_id")
+        found_idx = -1
+        if target_mid and matches:
+            for idx, m in enumerate(matches):
+                if m.get("match_id") == target_mid:
+                    found_idx = idx
+                    break
+
+        if found_idx >= 0:
+            self._current_index = found_idx
+        elif "current_index" in data and 0 <= data["current_index"] < len(matches):
+            self._current_index = data["current_index"]
+        else:
+            self._current_index = 0
+
+        self._render_current_match()
 
     def reposition_near(self, char_geo: QtCore.QRect, popup_geo: Optional[QtCore.QRect] = None) -> None:
         screen = QtGui.QGuiApplication.screenAt(char_geo.center()) or QtGui.QGuiApplication.primaryScreen()
@@ -4367,7 +4542,7 @@ class SettingsDialog(QtWidgets.QDialog):
         screen = QtGui.QGuiApplication.primaryScreen()
         avail = screen.availableGeometry() if screen else QtCore.QRect(0, 0, 1280, 800)
         target_w = min(720, max(640, avail.width() - 80))
-        target_h = min(650, max(540, avail.height() - 40))
+        target_h = min(740, max(680, avail.height() - 40))
         self.resize(target_w, target_h)
 
         self._config = CharacterConfig(**asdict(config))
@@ -4833,6 +5008,15 @@ class SettingsDialog(QtWidgets.QDialog):
         self._cricket_ticker_chk.setChecked(bool(getattr(self._config, "cricket_ticker_enabled", True)))
         wake_layout.addWidget(self._cricket_ticker_chk)
 
+        cricket_team_row = QtWidgets.QHBoxLayout()
+        cricket_team_row.setSpacing(8)
+        cricket_team_row.addWidget(QtWidgets.QLabel("Preferred Team / Match:"))
+        self._cricket_team_edit = QtWidgets.QLineEdit()
+        self._cricket_team_edit.setPlaceholderText("e.g. India, Australia, CSK (or blank for auto-track)")
+        self._cricket_team_edit.setText(getattr(self._config, "cricket_ticker_team_filter", ""))
+        cricket_team_row.addWidget(self._cricket_team_edit, 1)
+        wake_layout.addLayout(cricket_team_row)
+
         # Sound theme selection
         theme_row = QtWidgets.QHBoxLayout()
         theme_row.setSpacing(8)
@@ -5257,6 +5441,8 @@ class SettingsDialog(QtWidgets.QDialog):
             self._config.tts_voice = self._tts_voice_combo.currentData() or "auto"
         if hasattr(self, "_cricket_ticker_chk"):
             self._config.cricket_ticker_enabled = self._cricket_ticker_chk.isChecked()
+        if hasattr(self, "_cricket_team_edit"):
+            self._config.cricket_ticker_team_filter = self._cricket_team_edit.text().strip()
         if hasattr(self, "_theme_combo"):
             self._config.ui_theme = self._theme_combo.currentData() or "auto"
         return self._config
@@ -6713,6 +6899,8 @@ class DesktopCompanionApp(QtCore.QObject):
         self.cricket_ticker.score_clicked.connect(self._on_ticker_score_clicked)
         self.cricket_ticker.refresh_requested.connect(self._fetch_cricket_ticker_data)
         self.cricket_ticker.dismissed.connect(self._on_ticker_dismissed)
+        self.cricket_ticker.match_selected.connect(self._on_ticker_match_selected)
+        self.cricket_ticker.view_all_requested.connect(self._on_ticker_view_all_requested)
 
         # Wire popup signals
         self.popup.send_message.connect(self.send_user_message)
@@ -7594,8 +7782,25 @@ class DesktopCompanionApp(QtCore.QObject):
         self._position_popup_near_character()
         self.popup.show()
         self.popup.raise_()
-        q = f"Show me live cricket scores and scorecard for {title}" if title else "Show me live cricket scores"
+        if match_id and title:
+            q = f"Show me live cricket scores and full scorecard for {title} (Match ID: {match_id})"
+        elif title:
+            q = f"Show me live cricket scores and scorecard for {title}"
+        else:
+            q = "Show me live cricket scores"
         self.send_user_message(q)
+
+    def _on_ticker_match_selected(self, match_id: str, title: str) -> None:
+        self._config.cricket_ticker_match_id = match_id
+        self._config.save()
+        self._fetch_cricket_ticker_data()
+
+    def _on_ticker_view_all_requested(self) -> None:
+        self.show_character()
+        self._position_popup_near_character()
+        self.popup.show()
+        self.popup.raise_()
+        self.send_user_message("Show live cricket scores and summary for all active matches")
 
     def _on_ticker_dismissed(self) -> None:
         self._config.cricket_ticker_enabled = False
@@ -7641,9 +7846,12 @@ class DesktopCompanionApp(QtCore.QObject):
         if not getattr(self._config, "cricket_ticker_enabled", True) or not self.character.isVisible():
             return
 
+        pinned_id = getattr(self._config, "cricket_ticker_match_id", "")
+        team_filter = getattr(self._config, "cricket_ticker_team_filter", "")
+
         def _worker():
             try:
-                data = api_tools.get_live_cricket_ticker_data()
+                data = api_tools.get_live_cricket_ticker_data(query=team_filter, match_id=pinned_id)
                 if data:
                     self._cricket_ticker_data_ready.emit(data)
             except Exception:

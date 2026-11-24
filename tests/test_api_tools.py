@@ -826,5 +826,16 @@ def test_get_live_cricket_scores_mocked_scorecard_and_summary(monkeypatch: pytes
     assert "Australia" in ticker["title"] or "AUS" in ticker["title"]
     assert "ENG 328/10" in ticker["score"]
     assert ticker["is_live"] is True
+    assert "available_matches" in ticker
+    assert len(ticker["available_matches"]) >= 1
+
+    # 6. Pinned match_id and embedded Match ID in query
+    res_embedded = api_tools.get_live_cricket_scores(query="Show scorecard for Match ID: 151334")
+    assert "### 🏏 Australia vs England" in res_embedded
+
+    ticker_pinned = api_tools.get_live_cricket_ticker_data(match_id="151334")
+    assert ticker_pinned["match_id"] == "151334"
+    assert ticker_pinned["total_matches"] >= 1
+
 
 
