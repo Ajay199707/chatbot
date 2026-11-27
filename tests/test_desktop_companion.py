@@ -1761,6 +1761,113 @@ def test_settings_dialog_memory_tab(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         dlg.deleteLater()
 
 
+def test_clean_text_for_speech_does_not_truncate():
+    # Long text of 800+ chars with multiple sentences and markdown
+    paragraphs = [
+        "First sentence explaining artificial intelligence and companion architecture.",
+        "Second sentence detailing system tools, file system operations, and prompt engineering.",
+        "Third sentence reviewing real-time sports tickers, pomodoro timers, and calendar scheduling.",
+        "Fourth sentence validating neural text-to-speech synthesis without arbitrary character cut-offs.",
+        "Fifth sentence ensuring complete and uninterrupted spoken audio playback for the user.",
+    ]
+    raw_markdown = "\n\n".join(paragraphs)
+    assert len(raw_markdown) > 400
+    cleaned = dc.clean_text_for_speech(raw_markdown)
+    # Ensure it wasn't cut off at ~360 chars
+    assert len(cleaned) > 360
+    assert "First sentence" in cleaned
+    assert "Fifth sentence ensuring complete and uninterrupted spoken audio playback" in cleaned
+
+
+def test_chat_popup_narrate_action_bar():
+    _get_qapp()
+    cfg = dc.CharacterConfig()
+    popup = dc.ChatPopupWindow(cfg)
+    try:
+        received = []
+        popup.narrate_requested.connect(lambda txt, btn: received.append((txt, btn)))
+
+        # Test add_assistant_message generates action bar with narrate button
+        popup.add_assistant_message("Here is the generated answer for you.")
+        # Find QPushButton in layout
+        narrate_btns = [
+            b for b in popup.findChildren(QtWidgets.QPushButton) if "Narrate" in b.text()
+        ]
+        assert len(narrate_btns) >= 1
+        btn = narrate_btns[-1]
+        assert "Narrate" in btn.text()
+
+        # Click the button and check signal emission
+        btn.click()
+        assert len(received) == 1
+        assert received[0][0] == "Here is the generated answer for you."
+        assert received[0][1] is btn
+    finally:
+        popup.deleteLater()
+
+
+def test_companion_narration_decision_and_controls():
+    app = _get_qapp()
+    cfg = dc.CharacterConfig(tts_enabled=True, tts_auto_narrate=False)
+    companion = dc.DesktopCompanionApp(app, cfg)
+    try:
+        spoken_calls = []
+        stopped_calls = []
+
+        class MockTTSManager:
+            def __init__(self):
+                self._speaking = False
+
+            def speak(self, text, **kwargs):
+                spoken_calls.append(text)
+                self._speaking = True
+                if "on_started" in kwargs and kwargs["on_started"]:
+                    kwargs["on_started"]()
+
+            def stop(self):
+                stopped_calls.append(True)
+                self._speaking = False
+
+            def is_speaking(self):
+                return self._speaking
+
+        mock_tts = MockTTSManager()
+        companion._tts_manager = mock_tts
+
+        # 1. Normal turn without prompt requesting narration -> must NOT auto-narrate
+        companion.popup.clear_messages()
+        companion._prompt_requested_narration = False
+        companion._on_worker_finished("This is a standard answer that should NOT auto-speak.")
+        assert len(spoken_calls) == 0
+
+        # 2. Turn where user explicitly asked to narrate -> DOES speak
+        companion.send_user_message("Please narrate this response to me")
+        assert companion._prompt_requested_narration is True
+        companion._on_worker_finished("This response was requested to be read aloud.")
+        assert len(spoken_calls) == 1
+        assert "requested to be read aloud" in spoken_calls[0]
+
+        # 3. On-demand click of Narrate button -> speaks completely and updates button
+        btn = QtWidgets.QPushButton("🔊 Narrate")
+        companion._on_narrate_requested("Complete custom text to read.", btn)
+        assert len(spoken_calls) == 2
+        assert spoken_calls[1] == "Complete custom text to read."
+        assert btn.text() == "⏹ Stop"
+
+        # 4. Clicking the Stop button while speaking stops narration and resets button
+        companion._on_narrate_requested("Complete custom text to read.", btn)
+        assert len(stopped_calls) >= 1
+        assert btn.text() == "🔊 Narrate"
+
+        # 5. Config with tts_auto_narrate=True -> auto-speaks
+        companion._config.tts_auto_narrate = True
+        companion._on_worker_finished("Auto narrate is enabled so speak this.")
+        assert len(spoken_calls) == 3
+        assert "Auto narrate is enabled" in spoken_calls[2]
+    finally:
+        companion.quit_app()
+
+
 
 
 

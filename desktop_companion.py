@@ -152,15 +152,6 @@ def clean_text_for_speech(text: str) -> str:
     t = re.sub(r"[\U00010000-\U0010ffff]", "", t)
     # Normalize whitespaces
     t = re.sub(r"\s+", " ", t).strip()
-
-    # Truncate long essays cleanly at a sentence end (around ~350 chars)
-    if len(t) > 360:
-        cut = t[:360]
-        last_p = max(cut.rfind("."), cut.rfind("!"), cut.rfind("?"))
-        if last_p > 140:
-            t = cut[: last_p + 1]
-        else:
-            t = cut.rstrip() + "..."
     return t
 
 
@@ -912,6 +903,7 @@ class CharacterConfig:
     ui_theme: str = "auto"
     tts_enabled: bool = True
     tts_voice: str = "auto"
+    tts_auto_narrate: bool = False
     cricket_ticker_enabled: bool = True
     cricket_ticker_match_id: str = ""
     cricket_ticker_team_filter: str = ""
@@ -963,6 +955,7 @@ class CharacterConfig:
             cfg.wake_weather_city = (cfg.wake_weather_city or "Chennai").strip() or "Chennai"
             cfg.tts_enabled = bool(getattr(cfg, "tts_enabled", True))
             cfg.tts_voice = str(getattr(cfg, "tts_voice", "auto") or "auto").strip()
+            cfg.tts_auto_narrate = bool(getattr(cfg, "tts_auto_narrate", False))
             cfg.cricket_ticker_enabled = bool(getattr(cfg, "cricket_ticker_enabled", True))
             cfg.cricket_ticker_match_id = str(getattr(cfg, "cricket_ticker_match_id", "") or "").strip()
             cfg.cricket_ticker_team_filter = str(getattr(cfg, "cricket_ticker_team_filter", "") or "").strip()
@@ -3016,6 +3009,7 @@ class ChatPopupWindow(QtWidgets.QWidget):
     enable_web_tools_requested = QtCore.Signal()
     briefing_requested = QtCore.Signal()
     voice_toggled = QtCore.Signal(bool)
+    narrate_requested = QtCore.Signal(str, object)
 
     def __init__(self, config: CharacterConfig):
         super().__init__(
@@ -3721,6 +3715,26 @@ class ChatPopupWindow(QtWidgets.QWidget):
         row.addWidget(lbl)
         self._insert_widget(wrap)
 
+    def _create_assistant_action_bar(self, text: str) -> QtWidgets.QWidget:
+        bar = QtWidgets.QWidget()
+        bar.setStyleSheet("background: transparent;")
+        row = QtWidgets.QHBoxLayout(bar)
+        row.setContentsMargins(4, 0, 4, 4)
+        row.setSpacing(6)
+        row.addStretch(1)
+
+        narrate_btn = QtWidgets.QPushButton("🔊 Narrate")
+        narrate_btn.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        narrate_btn.setToolTip("Read this response aloud completely using Edge-TTS")
+        narrate_btn.setStyleSheet(
+            "QPushButton { background: rgba(51, 65, 85, 0.6); color: #94a3b8; border: 1px solid rgba(71, 85, 105, 0.4); "
+            "border-radius: 4px; padding: 2px 8px; font-size: 11px; font-weight: 500; } "
+            "QPushButton:hover { background: rgba(59, 130, 246, 0.35); color: #60a5fa; border-color: #3b82f6; }"
+        )
+        narrate_btn.clicked.connect(lambda: self.narrate_requested.emit(text, narrate_btn))
+        row.addWidget(narrate_btn)
+        return bar
+
     def add_assistant_message(self, text: str) -> None:
         """Instantly append an assistant message bubble (used for restoring persistent chat history)."""
         clean = (text or "").strip()
@@ -3745,6 +3759,7 @@ class ChatPopupWindow(QtWidgets.QWidget):
         browser.document().setTextWidth(max(240, vw - 24) if vw > 50 else 350)
         self._insert_widget(browser)
         self._sync_browser_height(browser)
+        self._insert_widget(self._create_assistant_action_bar(clean))
 
     def start_assistant_message(self) -> None:
         self._quota_banner.setVisible(False)
@@ -3823,6 +3838,7 @@ class ChatPopupWindow(QtWidgets.QWidget):
 
     def finish_assistant_message(self, final_text: str) -> None:
         self._render_timer.stop()
+        text_to_show = ""
         if self._streaming_bubble is not None:
             text_to_show = final_text or self._streaming_text
             if text_to_show:
@@ -3830,6 +3846,8 @@ class ChatPopupWindow(QtWidgets.QWidget):
                 self._sync_browser_height(self._streaming_bubble)
         self._streaming_bubble = None
         self._streaming_text = ""
+        if text_to_show:
+            self._insert_widget(self._create_assistant_action_bar(text_to_show))
         self._scroll_to_bottom()
 
     def show_error(self, message: str) -> None:
@@ -5054,6 +5072,12 @@ class SettingsDialog(QtWidgets.QDialog):
         self._tts_enabled_chk.setChecked(bool(getattr(self._config, "tts_enabled", True)))
         wake_layout.addWidget(self._tts_enabled_chk)
 
+        self._tts_auto_narrate_chk = QtWidgets.QCheckBox(
+            "Auto-narrate every response immediately (Off by default: narrate on demand via 🔊 button)"
+        )
+        self._tts_auto_narrate_chk.setChecked(bool(getattr(self._config, "tts_auto_narrate", False)))
+        wake_layout.addWidget(self._tts_auto_narrate_chk)
+
         tts_row = QtWidgets.QHBoxLayout()
         tts_row.setSpacing(8)
         tts_row.addWidget(QtWidgets.QLabel("Character Voice:"))
@@ -5701,6 +5725,8 @@ class SettingsDialog(QtWidgets.QDialog):
         self._config.voice_alarm_enabled = self._voice_alarm_chk.isChecked()
         if hasattr(self, "_tts_enabled_chk"):
             self._config.tts_enabled = self._tts_enabled_chk.isChecked()
+        if hasattr(self, "_tts_auto_narrate_chk"):
+            self._config.tts_auto_narrate = self._tts_auto_narrate_chk.isChecked()
         if hasattr(self, "_tts_voice_combo"):
             self._config.tts_voice = self._tts_voice_combo.currentData() or "auto"
         if hasattr(self, "_cricket_ticker_chk"):
@@ -7307,6 +7333,8 @@ class DesktopCompanionApp(QtCore.QObject):
         self._tts_manager = TextToSpeechManager()
         global _GLOBAL_TTS_MANAGER
         _GLOBAL_TTS_MANAGER = self._tts_manager
+        self._active_narrate_btn: Optional[QtWidgets.QPushButton] = None
+        self._prompt_requested_narration: bool = False
 
         self.character = CharacterWidget(config)
         self.wakeup_bubble = WakeupBubbleWidget(config.character_name)
@@ -7362,6 +7390,7 @@ class DesktopCompanionApp(QtCore.QObject):
         )
         self.popup.enable_web_tools_requested.connect(lambda: self.toggle_web_tools(True))
         self.popup.voice_toggled.connect(self._on_popup_voice_toggled)
+        self.popup.narrate_requested.connect(self._on_narrate_requested)
 
         # Alert popup & tasks dialog
         self._alert_popup: Optional[AlertNotificationPopup] = None
@@ -8182,6 +8211,9 @@ class DesktopCompanionApp(QtCore.QObject):
     def clear_conversation(self) -> None:
         if hasattr(self, "_tts_manager"):
             self._tts_manager.stop()
+        if self._active_narrate_btn is not None:
+            self._reset_narrate_btn(self._active_narrate_btn)
+            self._active_narrate_btn = None
         if self._worker_thread is not None and self._worker_thread.isRunning():
             return
         with self._bot_lock:
@@ -8198,8 +8230,19 @@ class DesktopCompanionApp(QtCore.QObject):
     def send_user_message(self, prompt: str, images: Optional[List[str]] = None) -> None:
         if hasattr(self, "_tts_manager"):
             self._tts_manager.stop()
+        if self._active_narrate_btn is not None:
+            self._reset_narrate_btn(self._active_narrate_btn)
+            self._active_narrate_btn = None
         if self._worker_thread is not None and self._worker_thread.isRunning():
             return
+
+        low = (prompt or "").lower()
+        narration_triggers = [
+            "narrate", "read aloud", "speak this", "speak out", "read this",
+            "speak aloud", "read it to me", "say it out loud", "voice this",
+            "speak your answer", "read your answer",
+        ]
+        self._prompt_requested_narration = any(trigger in low for trigger in narration_triggers)
 
         display_text = prompt
         if images and not prompt:
@@ -8235,6 +8278,9 @@ class DesktopCompanionApp(QtCore.QObject):
     def stop_streaming(self) -> None:
         if hasattr(self, "_tts_manager"):
             self._tts_manager.stop()
+        if self._active_narrate_btn is not None:
+            self._reset_narrate_btn(self._active_narrate_btn)
+            self._active_narrate_btn = None
         if self._worker is not None:
             self._worker.cancel_event.set()
             self.popup.set_status("Stopping...")
@@ -8281,7 +8327,13 @@ class DesktopCompanionApp(QtCore.QObject):
                 )
         if final_text and not self.popup.isVisible():
             self.character.show_speech_bubble(final_text)
-        if getattr(self._config, "tts_enabled", True) and final_text and hasattr(self, "_tts_manager"):
+        should_narrate = (
+            getattr(self._config, "tts_enabled", True)
+            and bool(final_text)
+            and (self._prompt_requested_narration or getattr(self._config, "tts_auto_narrate", False))
+        )
+        self._prompt_requested_narration = False
+        if should_narrate and hasattr(self, "_tts_manager"):
             self._tts_manager.speak(
                 final_text,
                 character_id=getattr(self._config, "character_id", "lumi"),
@@ -8297,6 +8349,67 @@ class DesktopCompanionApp(QtCore.QObject):
     def _on_thread_finished(self) -> None:
         self._worker_thread = None
         self._worker = None
+
+    def _on_narrate_requested(self, text: str, btn: QtWidgets.QPushButton) -> None:
+        if not hasattr(self, "_tts_manager"):
+            return
+        if self._active_narrate_btn is btn and self._tts_manager.is_speaking():
+            self._tts_manager.stop()
+            self._reset_narrate_btn(btn)
+            self._active_narrate_btn = None
+            return
+
+        if self._active_narrate_btn is not None and self._active_narrate_btn is not btn:
+            self._reset_narrate_btn(self._active_narrate_btn)
+
+        self._active_narrate_btn = btn
+        try:
+            btn.setText("⏹ Stop")
+            btn.setStyleSheet(
+                "QPushButton { background: #dc2626; color: #ffffff; border: 1px solid #ef4444; "
+                "border-radius: 4px; padding: 2px 8px; font-size: 11px; font-weight: bold; } "
+                "QPushButton:hover { background: #b91c1c; }"
+            )
+        except Exception:
+            pass
+
+        def _on_speech_started():
+            QtCore.QMetaObject.invokeMethod(
+                self.character, "set_state", QtCore.Qt.ConnectionType.QueuedConnection, QtCore.Q_ARG(str, "talking")
+            )
+
+        def _on_speech_finished():
+            QtCore.QMetaObject.invokeMethod(
+                self.character, "set_state", QtCore.Qt.ConnectionType.QueuedConnection, QtCore.Q_ARG(str, "idle")
+            )
+            QtCore.QMetaObject.invokeMethod(
+                self, "_on_narration_finished", QtCore.Qt.ConnectionType.QueuedConnection
+            )
+
+        self._tts_manager.speak(
+            text,
+            character_id=getattr(self._config, "character_id", "lumi"),
+            voice_override=getattr(self._config, "tts_voice", "auto"),
+            on_started=_on_speech_started,
+            on_finished=_on_speech_finished,
+        )
+
+    @QtCore.Slot()
+    def _on_narration_finished(self) -> None:
+        if self._active_narrate_btn is not None:
+            self._reset_narrate_btn(self._active_narrate_btn)
+            self._active_narrate_btn = None
+
+    def _reset_narrate_btn(self, btn: QtWidgets.QPushButton) -> None:
+        try:
+            btn.setText("🔊 Narrate")
+            btn.setStyleSheet(
+                "QPushButton { background: rgba(51, 65, 85, 0.6); color: #94a3b8; border: 1px solid rgba(71, 85, 105, 0.4); "
+                "border-radius: 4px; padding: 2px 8px; font-size: 11px; font-weight: 500; } "
+                "QPushButton:hover { background: rgba(59, 130, 246, 0.35); color: #60a5fa; border-color: #3b82f6; }"
+            )
+        except Exception:
+            pass
 
     def _on_ticker_score_clicked(self, match_id: str, title: str) -> None:
         self.show_character()
