@@ -59,6 +59,7 @@ from character_painters import (
 )
 import system_tools
 import task_manager
+import memory_manager
 
 
 def play_alert_sound(kind: str = "reminder", enabled: bool = True) -> None:
@@ -420,6 +421,22 @@ def _resolve_config_file() -> Path:
 
 
 CONFIG_FILE = _resolve_config_file()
+
+
+def _resolve_history_file() -> Path:
+    app_dir = chatbot.get_app_dir()
+    primary = app_dir / "chat_history.json"
+    if (
+        not primary.exists()
+        and getattr(sys, "frozen", False)
+        and app_dir.name.lower() == "dist"
+        and (app_dir.parent / "chat_history.json").is_file()
+    ):
+        return app_dir.parent / "chat_history.json"
+    return primary
+
+
+CHAT_HISTORY_FILE = _resolve_history_file()
 IMAGE_EXTENSIONS = {".png", ".gif", ".webp", ".jpg", ".jpeg", ".bmp"}
 SINGLE_INSTANCE_NAME = "ai_desktop_companion_v1"
 STARTUP_SHORTCUT_NAME = "AICharacterCompanion.lnk"
@@ -898,6 +915,10 @@ class CharacterConfig:
     cricket_ticker_enabled: bool = True
     cricket_ticker_match_id: str = ""
     cricket_ticker_team_filter: str = ""
+    persist_chat_history: bool = True
+    max_saved_history_messages: int = 50
+    enable_long_term_memory: bool = True
+    companion_memories: List[str] = field(default_factory=list)
 
     @classmethod
     def load(cls, path: Path = CONFIG_FILE) -> "CharacterConfig":
@@ -945,6 +966,20 @@ class CharacterConfig:
             cfg.cricket_ticker_enabled = bool(getattr(cfg, "cricket_ticker_enabled", True))
             cfg.cricket_ticker_match_id = str(getattr(cfg, "cricket_ticker_match_id", "") or "").strip()
             cfg.cricket_ticker_team_filter = str(getattr(cfg, "cricket_ticker_team_filter", "") or "").strip()
+            cfg.persist_chat_history = bool(getattr(cfg, "persist_chat_history", True))
+            try:
+                cfg.max_saved_history_messages = max(5, min(500, int(getattr(cfg, "max_saved_history_messages", 50))))
+            except (TypeError, ValueError):
+                cfg.max_saved_history_messages = 50
+            cfg.enable_long_term_memory = bool(getattr(cfg, "enable_long_term_memory", True))
+            # Sync companion memories with memory_manager
+            loaded_mems = memory_manager.load_memories()
+            if not getattr(cfg, "companion_memories", None) and loaded_mems:
+                cfg.companion_memories = loaded_mems
+            elif getattr(cfg, "companion_memories", None) and not loaded_mems:
+                memory_manager.save_memories(cfg.companion_memories)
+            elif getattr(cfg, "companion_memories", None):
+                cfg.companion_memories = loaded_mems
             return cfg
         except Exception:
             return cls()
@@ -1130,6 +1165,8 @@ def build_effective_system_prompt(
     use_tools: bool,
     enable_system_tools: bool = False,
     allow_all_drives: bool = False,
+    memories: Optional[List[str]] = None,
+    enable_long_term_memory: bool = True,
 ) -> str:
     clean_name = (name or "Lumi").strip() or "Lumi"
     clean_persona = (personality or PERSONA_PRESETS["Cute Desktop Pet"]).strip()
@@ -1140,12 +1177,17 @@ def build_effective_system_prompt(
             "gold/silver prices in India (get_india_gold_price), latest news (get_news), current date/time "
             "(get_current_datetime), live cricket scores/updates (get_live_cricket_scores), maps/places/directions (maps_lookup), databases (database_query), "
             "email (email_action), calendar events (calendar_action), payments (payment_action), "
+            "remembering personal facts/preferences (remember_user_fact, forget_user_fact, list_user_memories), "
             "or custom/company internal APIs (list_custom_apis / call_custom_api), call your available tools first "
             "and report the real-time result honestly."
         )
         custom_summary = api_tools.custom_apis_prompt_summary()
         if custom_summary:
             parts.append(custom_summary)
+    if enable_long_term_memory:
+        mem_sec = memory_manager.format_memories_for_prompt(memories)
+        if mem_sec:
+            parts.append(mem_sec)
     if enable_system_tools:
         parts.append(
             "You also have PC & File Control tools (search_files, list_drives, list_directory, get_folder_size, "
@@ -3679,6 +3721,31 @@ class ChatPopupWindow(QtWidgets.QWidget):
         row.addWidget(lbl)
         self._insert_widget(wrap)
 
+    def add_assistant_message(self, text: str) -> None:
+        """Instantly append an assistant message bubble (used for restoring persistent chat history)."""
+        clean = (text or "").strip()
+        if not clean:
+            return
+        browser = QtWidgets.QTextBrowser()
+        browser.setOpenExternalLinks(False)
+        browser.anchorClicked.connect(self._on_browser_anchor_clicked)
+        browser.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        browser.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        browser.setWordWrapMode(QtGui.QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+        browser.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
+        browser.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        browser.setStyleSheet(
+            "QTextBrowser{background:rgba(30, 41, 59, 0.88);color:#f1f5f9;border:1px solid rgba(51, 65, 85, 0.7);"
+            "border-radius:14px;border-bottom-left-radius:3px;padding:9px 12px;font-size:13px;}"
+        )
+        if hasattr(self, "_bubble_wheel_filter") and self._bubble_wheel_filter:
+            browser.viewport().installEventFilter(self._bubble_wheel_filter)
+        browser.setHtml(markdown_to_qt_html(clean))
+        vw = self._scroll.viewport().width() if hasattr(self, "_scroll") else 350
+        browser.document().setTextWidth(max(240, vw - 24) if vw > 50 else 350)
+        self._insert_widget(browser)
+        self._sync_browser_height(browser)
+
     def start_assistant_message(self) -> None:
         self._quota_banner.setVisible(False)
         self._streaming_text = ""
@@ -4562,6 +4629,7 @@ class SettingsDialog(QtWidgets.QDialog):
         self._tabs.addTab(self._build_pc_files_tab(), "PC && Files")
         self._tabs.addTab(self._build_apis_tab(), "APIs && Tools")
         self._tabs.addTab(self._build_wake_topics_tab(), "Wake-Up && Topics")
+        self._tabs.addTab(self._build_memory_tab(), "🧠 Memory")
         layout.addWidget(self._tabs, 1)
 
         buttons = QtWidgets.QDialogButtonBox(
@@ -5112,6 +5180,200 @@ class SettingsDialog(QtWidgets.QDialog):
         self._refresh_topics_list()
         return tab
 
+    def _build_memory_tab(self) -> QtWidgets.QWidget:
+        tab = QtWidgets.QWidget()
+        vbox = QtWidgets.QVBoxLayout(tab)
+        vbox.setContentsMargins(12, 10, 12, 10)
+        vbox.setSpacing(10)
+
+        # 1. Chat History & Session Continuity Group
+        hist_box, hist_form = self._create_form_card("Persistent Chat History (Session Continuity)", vertical_spacing=6)
+
+        self._persist_history_chk = QtWidgets.QCheckBox("Persist chat conversation history across app restarts")
+        self._persist_history_chk.setChecked(bool(getattr(self._config, "persist_chat_history", True)))
+        self._add_option_with_hint(
+            vbox,
+            self._persist_history_chk,
+            "Automatically saves messages to disk so conversations resume seamlessly when the app restarts.",
+        )
+        hist_form.addRow(self._persist_history_chk)
+
+        self._max_history_spin = QtWidgets.QSpinBox()
+        self._max_history_spin.setRange(5, 500)
+        self._max_history_spin.setSingleStep(5)
+        self._max_history_spin.setValue(int(getattr(self._config, "max_saved_history_messages", 50)))
+        hist_form.addRow("Max messages to retain in history:", self._max_history_spin)
+
+        clear_hist_btn = QtWidgets.QPushButton("🗑 Clear Saved Chat History Now")
+        clear_hist_btn.setStyleSheet(
+            "QPushButton{background:#1e293b;color:#f87171;border:1px solid #475569;border-radius:6px;padding:6px 12px;font-weight:600;}"
+            "QPushButton:hover{background:#dc2626;color:#ffffff;}"
+        )
+        clear_hist_btn.clicked.connect(self._clear_saved_chat_history)
+        hist_form.addRow("", clear_hist_btn)
+
+        vbox.addWidget(hist_box)
+
+        # 2. Companion Long-Term Memory (Personal Facts & Preferences) Group
+        mem_box = QtWidgets.QGroupBox("Long-Term Companion Memory (Personal Facts & Preferences)")
+        mem_layout = QtWidgets.QVBoxLayout(mem_box)
+        mem_layout.setContentsMargins(10, 8, 10, 8)
+        mem_layout.setSpacing(8)
+
+        self._enable_memory_chk = QtWidgets.QCheckBox("Enable Long-Term Companion Memory")
+        self._enable_memory_chk.setChecked(bool(getattr(self._config, "enable_long_term_memory", True)))
+        self._add_option_with_hint(
+            mem_layout,
+            self._enable_memory_chk,
+            "Your companion remembers personal facts, work preferences, and details you mention in chat or add below.",
+        )
+
+        # Quick Add Row
+        add_row = QtWidgets.QHBoxLayout()
+        add_row.setSpacing(6)
+        self._new_memory_edit = QtWidgets.QLineEdit()
+        self._new_memory_edit.setPlaceholderText("Type a new fact (e.g. 'I work on Python projects', 'My dog is named Milo')...")
+        self._new_memory_edit.setStyleSheet(
+            "QLineEdit{background:#1e293b;color:#ffffff;border:1px solid #334155;border-radius:6px;padding:6px 10px;font-size:12px;}"
+            "QLineEdit:focus{border-color:#38bdf8;}"
+        )
+        self._new_memory_edit.returnPressed.connect(self._add_manual_memory)
+
+        add_mem_btn = QtWidgets.QPushButton("+ Add Fact")
+        add_mem_btn.setStyleSheet(
+            "QPushButton{background:#0284c7;color:#ffffff;border:none;border-radius:6px;padding:6px 14px;font-weight:600;font-size:12px;}"
+            "QPushButton:hover{background:#0369a1;}"
+        )
+        add_mem_btn.clicked.connect(self._add_manual_memory)
+        add_row.addWidget(self._new_memory_edit, 1)
+        add_row.addWidget(add_mem_btn)
+        mem_layout.addLayout(add_row)
+
+        # Scrollable List of Remembered Facts
+        self._memories_list_widget = QtWidgets.QListWidget()
+        self._memories_list_widget.setStyleSheet(
+            "QListWidget{background:#0f172a;border:1px solid #334155;border-radius:8px;padding:4px;color:#f8fafc;font-size:12px;}"
+            "QListWidget::item{padding:3px;border-bottom:1px solid #1e293b;}"
+        )
+        self._memories_draft: List[str] = list(memory_manager.load_memories())
+        self._refresh_memories_ui()
+        mem_layout.addWidget(self._memories_list_widget, 1)
+
+        # Bottom actions row
+        btn_row = QtWidgets.QHBoxLayout()
+        self._mem_count_label = QtWidgets.QLabel(f"Total remembered facts: {len(self._memories_draft)}")
+        self._mem_count_label.setStyleSheet("color:#94a3b8;font-size:11px;")
+        btn_row.addWidget(self._mem_count_label)
+        btn_row.addStretch(1)
+
+        clear_all_mems_btn = QtWidgets.QPushButton("Clear All Memories")
+        clear_all_mems_btn.setStyleSheet(
+            "QPushButton{background:transparent;color:#f87171;border:1px solid #7f1d1d;border-radius:6px;padding:4px 10px;font-size:11px;}"
+            "QPushButton:hover{background:#991b1b;color:#ffffff;}"
+        )
+        clear_all_mems_btn.clicked.connect(self._clear_all_memories_clicked)
+        btn_row.addWidget(clear_all_mems_btn)
+        mem_layout.addLayout(btn_row)
+
+        vbox.addWidget(mem_box, 1)
+        return tab
+
+    def _refresh_memories_ui(self) -> None:
+        if not hasattr(self, "_memories_list_widget"):
+            return
+        self._memories_list_widget.clear()
+        if not self._memories_draft:
+            item = QtWidgets.QListWidgetItem()
+            lbl = QtWidgets.QLabel("No memories stored yet. Type a fact above or tell your companion in chat!")
+            lbl.setStyleSheet("color:#64748b;font-style:italic;padding:12px;font-size:12px;")
+            lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            self._memories_list_widget.addItem(item)
+            self._memories_list_widget.setItemWidget(item, lbl)
+            item.setSizeHint(lbl.sizeHint())
+            if hasattr(self, "_mem_count_label"):
+                self._mem_count_label.setText("Total remembered facts: 0")
+            return
+
+        for idx, fact in enumerate(self._memories_draft):
+            item = QtWidgets.QListWidgetItem()
+            row_widget = QtWidgets.QWidget()
+            row_layout = QtWidgets.QHBoxLayout(row_widget)
+            row_layout.setContentsMargins(6, 4, 6, 4)
+            row_layout.setSpacing(8)
+
+            num_lbl = QtWidgets.QLabel(f"{idx+1}.")
+            num_lbl.setStyleSheet("color:#38bdf8;font-weight:bold;font-size:11px;")
+            row_layout.addWidget(num_lbl)
+
+            fact_lbl = QtWidgets.QLabel(fact)
+            fact_lbl.setWordWrap(True)
+            fact_lbl.setStyleSheet("color:#f1f5f9;font-size:12px;")
+            row_layout.addWidget(fact_lbl, 1)
+
+            del_btn = QtWidgets.QPushButton("✕")
+            del_btn.setFixedSize(24, 24)
+            del_btn.setToolTip("Delete this memory")
+            del_btn.setStyleSheet(
+                "QPushButton{background:#1e293b;color:#94a3b8;border:1px solid #334155;border-radius:12px;font-weight:bold;font-size:11px;}"
+                "QPushButton:hover{background:#ef4444;color:#ffffff;border-color:#ef4444;}"
+            )
+            del_btn.clicked.connect(lambda _, f=fact: self._delete_single_memory(f))
+            row_layout.addWidget(del_btn)
+
+            row_widget.setLayout(row_layout)
+            self._memories_list_widget.addItem(item)
+            item.setSizeHint(row_widget.sizeHint())
+            self._memories_list_widget.setItemWidget(item, row_widget)
+
+        if hasattr(self, "_mem_count_label"):
+            self._mem_count_label.setText(f"Total remembered facts: {len(self._memories_draft)}")
+
+    def _add_manual_memory(self) -> None:
+        text = self._new_memory_edit.text().strip()
+        if not text:
+            return
+        if text.lower() in [m.lower() for m in self._memories_draft]:
+            QtWidgets.QMessageBox.information(self, "Already Remembered", f"'{text}' is already in companion memory.")
+            return
+        self._memories_draft.append(text)
+        memory_manager.save_memories(self._memories_draft)
+        self._new_memory_edit.clear()
+        self._refresh_memories_ui()
+
+    def _delete_single_memory(self, fact: str) -> None:
+        self._memories_draft = [m for m in self._memories_draft if m != fact]
+        memory_manager.save_memories(self._memories_draft)
+        self._refresh_memories_ui()
+
+    def _clear_all_memories_clicked(self) -> None:
+        if not self._memories_draft:
+            return
+        ret = QtWidgets.QMessageBox.question(
+            self,
+            "Clear All Memories?",
+            "Are you sure you want to delete all long-term memories and facts? This cannot be undone.",
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+        )
+        if ret == QtWidgets.QMessageBox.StandardButton.Yes:
+            self._memories_draft.clear()
+            memory_manager.save_memories(self._memories_draft)
+            self._refresh_memories_ui()
+
+    def _clear_saved_chat_history(self) -> None:
+        ret = QtWidgets.QMessageBox.question(
+            self,
+            "Clear Saved Chat History?",
+            "Are you sure you want to clear saved chat conversation history on disk?",
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+        )
+        if ret == QtWidgets.QMessageBox.StandardButton.Yes:
+            hist_file = _resolve_history_file()
+            try:
+                hist_file.write_text("[]", encoding="utf-8")
+            except Exception:
+                pass
+            QtWidgets.QMessageBox.information(self, "History Cleared", "Saved conversation history has been cleared.")
+
     def _refresh_topics_list(self, select_row: Optional[int] = None) -> None:
         self._topics_list.clear()
         for t in self._topics_draft:
@@ -5447,6 +5709,14 @@ class SettingsDialog(QtWidgets.QDialog):
             self._config.cricket_ticker_team_filter = self._cricket_team_edit.text().strip()
         if hasattr(self, "_theme_combo"):
             self._config.ui_theme = self._theme_combo.currentData() or "auto"
+        if hasattr(self, "_persist_history_chk"):
+            self._config.persist_chat_history = self._persist_history_chk.isChecked()
+        if hasattr(self, "_max_history_spin"):
+            self._config.max_saved_history_messages = int(self._max_history_spin.value())
+        if hasattr(self, "_enable_memory_chk"):
+            self._config.enable_long_term_memory = self._enable_memory_chk.isChecked()
+        if hasattr(self, "_memories_draft"):
+            self._config.companion_memories = list(self._memories_draft)
         return self._config
 
     def _browse_custom_wav(self) -> None:
@@ -7028,6 +7298,8 @@ class DesktopCompanionApp(QtCore.QObject):
                     config.use_tools,
                     enable_system_tools=config.enable_system_tools,
                     allow_all_drives=bool(config.allow_all_user_folders),
+                    memories=memory_manager.load_memories(),
+                    enable_long_term_memory=bool(getattr(config, "enable_long_term_memory", True)),
                 ),
             )
         )
@@ -7041,6 +7313,7 @@ class DesktopCompanionApp(QtCore.QObject):
         theme = get_ui_theme(getattr(config, "ui_theme", "auto"), character_id=getattr(config, "character_id", "lumi"))
         self.cricket_ticker = CricketTickerWidget(config.character_name, theme=theme)
         self.popup = ChatPopupWindow(config)
+        self._load_chat_history()
         self._tray = self._create_tray_icon()
 
         # Wire character signals
@@ -7604,6 +7877,8 @@ class DesktopCompanionApp(QtCore.QObject):
                     new_cfg.use_tools,
                     enable_system_tools=new_cfg.enable_system_tools,
                     allow_all_drives=bool(new_cfg.allow_all_user_folders),
+                    memories=memory_manager.load_memories(),
+                    enable_long_term_memory=bool(getattr(new_cfg, "enable_long_term_memory", True)),
                 ),
             )
         theme = get_ui_theme(getattr(new_cfg, "ui_theme", "auto"), character_id=getattr(new_cfg, "character_id", "lumi"))
@@ -7848,6 +8123,62 @@ class DesktopCompanionApp(QtCore.QObject):
         y = max(avail.top() + 10, min(char_rect.top(), avail.bottom() - popup.height() - 10))
         popup.move(x, y)
 
+    def _save_chat_history(self) -> None:
+        if not getattr(self._config, "persist_chat_history", True):
+            return
+        try:
+            with self._bot_lock:
+                history = list(self._bot.history)
+            max_msgs = max(5, int(getattr(self._config, "max_saved_history_messages", 50)))
+            if len(history) > max_msgs:
+                history = history[-max_msgs:]
+            records = []
+            for m in history:
+                if not getattr(m, "content", None):
+                    continue
+                records.append({
+                    "role": m.role,
+                    "content": m.content,
+                    "thoughts": getattr(m, "thoughts", "") or "",
+                })
+            hist_path = _resolve_history_file()
+            hist_path.parent.mkdir(parents=True, exist_ok=True)
+            hist_path.write_text(json.dumps(records, indent=2, ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            pass
+
+    def _load_chat_history(self) -> None:
+        if not getattr(self._config, "persist_chat_history", True):
+            return
+        hist_path = _resolve_history_file()
+        if not hist_path.is_file():
+            return
+        try:
+            raw = json.loads(hist_path.read_text(encoding="utf-8"))
+            if not isinstance(raw, list) or not raw:
+                return
+            count = 0
+            with self._bot_lock:
+                for item in raw:
+                    if not isinstance(item, dict):
+                        continue
+                    role = str(item.get("role", "user")).strip()
+                    content = str(item.get("content", "")).strip()
+                    thoughts = str(item.get("thoughts", "")).strip()
+                    if not content:
+                        continue
+                    msg = chatbot.Message(role=role, content=content, thoughts=thoughts)
+                    self._bot.history.append(msg)
+                    if role == "user":
+                        self.popup.add_user_message(content)
+                    elif role == "assistant":
+                        self.popup.add_assistant_message(content)
+                    count += 1
+            if count > 0:
+                self.popup.add_system_note(f"Resumed previous conversation ({count} messages).")
+        except Exception:
+            pass
+
     def clear_conversation(self) -> None:
         if hasattr(self, "_tts_manager"):
             self._tts_manager.stop()
@@ -7855,6 +8186,12 @@ class DesktopCompanionApp(QtCore.QObject):
             return
         with self._bot_lock:
             self._bot.reset_history()
+        hist_path = _resolve_history_file()
+        if hist_path.exists():
+            try:
+                hist_path.write_text("[]", encoding="utf-8")
+            except Exception:
+                pass
         self.popup.clear_messages()
         self.popup.add_system_note("Conversation cleared.")
 
@@ -7929,6 +8266,19 @@ class DesktopCompanionApp(QtCore.QObject):
         self.popup.set_streaming(False)
         self.popup.finish_assistant_message(final_text)
         self.character.set_state("idle")
+        self._save_chat_history()
+        if getattr(self._config, "enable_long_term_memory", True):
+            current_mems = memory_manager.load_memories()
+            with self._bot_lock:
+                self._bot.config.system_prompt = build_effective_system_prompt(
+                    self._config.character_name,
+                    self._config.personality_prompt,
+                    self._config.use_tools,
+                    enable_system_tools=self._config.enable_system_tools,
+                    allow_all_drives=bool(self._config.allow_all_user_folders),
+                    memories=current_mems,
+                    enable_long_term_memory=True,
+                )
         if final_text and not self.popup.isVisible():
             self.character.show_speech_bubble(final_text)
         if getattr(self._config, "tts_enabled", True) and final_text and hasattr(self, "_tts_manager"):

@@ -845,4 +845,27 @@ def test_mock_stream_turn_routes_cricket_scores(monkeypatch):
     assert "IND 280/4" in tool_end["result"]
 
 
+def test_mock_stream_turn_routes_memory_tools(tmp_path, monkeypatch):
+    import memory_manager
+    mem_file = tmp_path / "mock_memories.json"
+    monkeypatch.setattr(memory_manager, "get_memories_path", lambda custom_path=None: mem_file)
+
+    bot = chatbot.Chatbot(chatbot.ChatbotConfig(provider="mock", use_tools=True))
+
+    # 1. Remember fact
+    evs_rem = list(bot.stream_turn("Please remember that my favorite color is ocean blue"))
+    assert any(e.get("type") == "tool_start" and e.get("name") == "remember_user_fact" for e in evs_rem)
+    assert any("ocean blue" in str(e.get("result", "")) for e in evs_rem if e.get("type") == "tool_end")
+
+    # 2. List memories
+    evs_list = list(bot.stream_turn("What do you remember about me?"))
+    assert any(e.get("type") == "tool_start" and e.get("name") == "list_user_memories" for e in evs_list)
+    assert any("ocean blue" in str(e.get("result", "")) for e in evs_list if e.get("type") == "tool_end")
+
+    # 3. Forget fact
+    evs_forget = list(bot.stream_turn("Forget my favorite color"))
+    assert any(e.get("type") == "tool_start" and e.get("name") == "forget_user_fact" for e in evs_forget)
+
+
+
 

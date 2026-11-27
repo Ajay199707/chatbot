@@ -2015,6 +2015,30 @@ class Chatbot:
             elif "pomodoro" in lower and any(w in lower for w in ("status", "check", "time", "left", "remaining", "how much")):
                 tool_plan = ("get_pomodoro_status", {})
 
+            # Companion Long-Term Memory
+            elif any(lower.startswith(p) for p in ("remember that", "remember this", "remember fact", "keep in mind that", "please remember", "remember:")) or (
+                lower.startswith("remember ") and not any(kw in lower for kw in ("reminder", "reminders", "remind me"))
+            ):
+                fact_text = re.sub(
+                    r"^\s*(?:please\s+)?(?:remember\s+(?:that|this|fact)?\s*:?|keep\s+in\s+mind\s+(?:that)?\s*:?)",
+                    "",
+                    user_input,
+                    flags=re.IGNORECASE,
+                ).strip(" ?.:,'\"")
+                if fact_text:
+                    tool_plan = ("remember_user_fact", {"fact": fact_text})
+            elif any(lower.startswith(p) for p in ("forget that", "forget memory", "forget fact", "delete memory", "remove memory", "forget ")):
+                forget_q = re.sub(
+                    r"^\s*(?:please\s+)?(?:forget\s+(?:that|fact|memory)?\s*:?|delete\s+memory\s*:?|remove\s+memory\s*:?)",
+                    "",
+                    user_input,
+                    flags=re.IGNORECASE,
+                ).strip(" ?.:,'\"")
+                if forget_q:
+                    tool_plan = ("forget_user_fact", {"query": forget_q})
+            elif any(kw in lower for kw in ("what do you remember", "list memories", "show memories", "my memories", "view memories", "what are my memories", "check memories")):
+                tool_plan = ("list_user_memories", {})
+
             elif any(kw in lower for kw in ("weather", "forecast", "temperature")):
                 wm = re.search(
                     r"(?:weather|forecast|temperature)\s+(?:today\s+|now\s+|currently\s+)?(?:in|at|for|of)\s+(.+?)\s*[?.!]*$",

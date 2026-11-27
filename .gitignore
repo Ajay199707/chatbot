@@ -3,6 +3,8 @@
 character_config.json
 custom_apis.json
 reminders_and_tasks.json
+chat_history.json
+companion_memories.json
 
 # PyInstaller / executable build artifacts
 build/

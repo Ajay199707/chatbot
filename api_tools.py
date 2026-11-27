@@ -43,6 +43,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import httpx
 
+import memory_manager
 import system_tools
 
 ConfirmCallback = Callable[[str, str, str], bool]
@@ -1938,6 +1939,64 @@ def call_custom_api(
 
 
 # ============================================================
+# COMPANION LONG-TERM MEMORY TOOLS
+# ============================================================
+
+def remember_user_fact(fact: str, *, memories_path: Optional[Path] = None) -> str:
+    """Store a key user fact, preference, or detail into persistent long-term memory."""
+    clean_fact = (fact or "").strip()
+    if not clean_fact:
+        return json.dumps({"error": "Cannot remember an empty fact. Please provide a clear fact or preference."})
+    success, msg = memory_manager.add_memory(clean_fact, path=memories_path)
+    memories = memory_manager.load_memories(path=memories_path)
+    return json.dumps({
+        "status": "success" if success else "already_exists",
+        "message": msg,
+        "total_memories": len(memories),
+        "all_memories": memories,
+    })
+
+
+def forget_user_fact(query: str, *, memories_path: Optional[Path] = None) -> str:
+    """Remove a remembered user fact or preference by index or text match."""
+    clean_q = (query or "").strip()
+    if not clean_q:
+        return json.dumps({"error": "Please specify which fact to forget (or index number)."})
+    count, removed = memory_manager.remove_memory(clean_q, path=memories_path)
+    memories = memory_manager.load_memories(path=memories_path)
+    if count == 0:
+        return json.dumps({
+            "status": "not_found",
+            "message": f"No stored memory matched '{clean_q}'.",
+            "total_memories": len(memories),
+            "all_memories": memories,
+        })
+    return json.dumps({
+        "status": "success",
+        "message": f"Removed {count} memory/memories: {', '.join(removed)}",
+        "removed": removed,
+        "total_memories": len(memories),
+        "all_memories": memories,
+    })
+
+
+def list_user_memories(*, memories_path: Optional[Path] = None) -> str:
+    """List all user facts, preferences, and details stored in persistent long-term memory."""
+    memories = memory_manager.load_memories(path=memories_path)
+    if not memories:
+        return json.dumps({
+            "status": "empty",
+            "message": "No user memories stored yet. Tell me something you want me to remember!",
+            "memories": [],
+        })
+    return json.dumps({
+        "status": "success",
+        "total": len(memories),
+        "memories": memories,
+    })
+
+
+# ============================================================
 # TOOL SCHEMAS & DISPATCH
 # ============================================================
 
@@ -2147,6 +2206,44 @@ def get_api_tool_specs(custom_apis_path: Optional[Path] = None) -> List[Dict[str
             },
             "required": ["api_id"],
         },
+        {
+            "name": "remember_user_fact",
+            "description": (
+                "Save a personal fact, preference, habit, or detail about the user into your persistent long-term memory. "
+                "Use this whenever the user shares facts about themselves (e.g. 'My name is Alex', 'I prefer Python', "
+                "'I live in Chennai', 'Remember that my dog is named Milo') or asks you to remember something for future sessions."
+            ),
+            "properties": {
+                "fact": {
+                    "type": "string",
+                    "description": "The personal fact, habit, or preference to remember.",
+                },
+            },
+            "required": ["fact"],
+        },
+        {
+            "name": "forget_user_fact",
+            "description": (
+                "Remove a fact or preference from your persistent long-term memory by keyword match or 1-based index number. "
+                "Use when the user asks you to forget a detail, preference, or fact about them."
+            ),
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Keyword to match in remembered facts, or 1-based memory number.",
+                },
+            },
+            "required": ["query"],
+        },
+        {
+            "name": "list_user_memories",
+            "description": (
+                "View all facts, preferences, and details currently stored in your persistent long-term memory. "
+                "Use when the user asks what you remember about them or to check stored facts."
+            ),
+            "properties": {},
+            "required": [],
+        },
     ]
 
 
@@ -2160,6 +2257,9 @@ API_TOOL_NAMES = {
     "payment_action",
     "list_custom_apis",
     "call_custom_api",
+    "remember_user_fact",
+    "forget_user_fact",
+    "list_user_memories",
 }
 
 
@@ -2171,6 +2271,16 @@ def execute_api_tool(
     custom_apis_path: Optional[Path] = None,
 ) -> Optional[str]:
     """Dispatch an extended API tool call if `name` is handled by `api_tools`."""
+    if name == "remember_user_fact":
+        return remember_user_fact(
+            fact=str(args.get("fact", "")),
+        )
+    if name == "forget_user_fact":
+        return forget_user_fact(
+            query=str(args.get("query", "")),
+        )
+    if name == "list_user_memories":
+        return list_user_memories()
     if name == "get_weather":
         return get_weather(
             location=str(args.get("location", "")),

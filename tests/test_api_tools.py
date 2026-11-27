@@ -838,4 +838,68 @@ def test_get_live_cricket_scores_mocked_scorecard_and_summary(monkeypatch: pytes
     assert ticker_pinned["total_matches"] >= 1
 
 
+def test_companion_memory_manager_and_api_tools(tmp_path: Path) -> None:
+    mem_file = tmp_path / "test_memories.json"
+    import memory_manager
+
+    # Initially empty
+    assert memory_manager.load_memories(mem_file) == []
+
+    # Add memory
+    ok, msg = memory_manager.add_memory("User works as a software engineer", path=mem_file)
+    assert ok is True
+    assert "software engineer" in msg
+    assert memory_manager.load_memories(mem_file) == ["User works as a software engineer"]
+
+    # Duplicate rejection
+    ok_dup, msg_dup = memory_manager.add_memory("User works as a software engineer", path=mem_file)
+    assert ok_dup is False
+    assert "already" in msg_dup.lower()
+
+    # Add second memory
+    ok2, _ = memory_manager.add_memory("User loves cricket and supports CSK", path=mem_file)
+    assert ok2 is True
+    assert len(memory_manager.load_memories(mem_file)) == 2
+
+    # format_memories_for_prompt
+    prompt_sec = memory_manager.format_memories_for_prompt(memory_manager.load_memories(mem_file))
+    assert "[Persistent Long-Term Memory & User Facts]:" in prompt_sec
+    assert "User works as a software engineer" in prompt_sec
+    assert "User loves cricket and supports CSK" in prompt_sec
+
+    # Remove by text query
+    cnt, rem = memory_manager.remove_memory("cricket", path=mem_file)
+    assert cnt == 1
+    assert "CSK" in rem[0]
+    assert len(memory_manager.load_memories(mem_file)) == 1
+
+    # Remove by index (1-based)
+    cnt_idx, rem_idx = memory_manager.remove_memory("1", path=mem_file)
+    assert cnt_idx == 1
+    assert memory_manager.load_memories(mem_file) == []
+
+    # API tools integration
+    res_add = api_tools.remember_user_fact("User prefers dark mode", memories_path=mem_file)
+    data_add = json.loads(res_add)
+    assert data_add["status"] == "success"
+    assert "dark mode" in data_add["all_memories"][0]
+
+    res_list = api_tools.list_user_memories(memories_path=mem_file)
+    data_list = json.loads(res_list)
+    assert data_list["status"] == "success"
+    assert data_list["total"] == 1
+
+    res_forget = api_tools.forget_user_fact("dark mode", memories_path=mem_file)
+    data_forget = json.loads(res_forget)
+    assert data_forget["status"] == "success"
+    assert data_forget["total_memories"] == 0
+
+    # Dispatch via execute_api_tool
+    res_exec = api_tools.execute_api_tool("remember_user_fact", {"fact": "User speaks Tamil and English"})
+    assert "Tamil" in res_exec
+    # Clean up default memory file if modified
+    api_tools.execute_api_tool("forget_user_fact", {"query": "Tamil"})
+
+
+
 

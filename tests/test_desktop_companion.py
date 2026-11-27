@@ -1,5 +1,6 @@
 """Tests for desktop_companion.py (config, Markdown rendering, sprite loading, PySide6 UI)."""
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -495,9 +496,9 @@ def test_settings_dialog_uses_tabs_without_scrollarea_or_clipping():
     dlg = dc.SettingsDialog(cfg)
     try:
         assert dlg.findChildren(QtWidgets.QScrollArea) == []
-        assert dlg._tabs.count() == 5
+        assert dlg._tabs.count() == 6
         tab_labels = [dlg._tabs.tabText(i).replace("&&", "&") for i in range(dlg._tabs.count())]
-        assert tab_labels == ["Character", "AI & API Keys", "PC & Files", "APIs & Tools", "Wake-Up & Topics"]
+        assert tab_labels == ["Character", "AI & API Keys", "PC & Files", "APIs & Tools", "Wake-Up & Topics", "🧠 Memory"]
         dlg.show()
         for idx in range(dlg._tabs.count()):
             dlg._tabs.setCurrentIndex(idx)
@@ -1636,6 +1637,129 @@ def test_companion_cricket_ticker_data_and_toggle():
         assert companion.cricket_ticker.isVisible() is True
     finally:
         companion.quit_app()
+
+
+def test_character_config_memory_and_history_fields(tmp_path: Path):
+    cfg_file = tmp_path / "test_cfg.json"
+    cfg = dc.CharacterConfig(
+        persist_chat_history=True,
+        max_saved_history_messages=75,
+        enable_long_term_memory=True,
+        companion_memories=["Likes Python", "Lives in Chennai"],
+    )
+    cfg.save(cfg_file)
+    assert cfg_file.is_file()
+
+    loaded = dc.CharacterConfig.load(cfg_file)
+    assert loaded.persist_chat_history is True
+    assert loaded.max_saved_history_messages == 75
+    assert loaded.enable_long_term_memory is True
+    assert "Likes Python" in loaded.companion_memories
+    assert "Lives in Chennai" in loaded.companion_memories
+
+
+def test_build_effective_system_prompt_with_memories():
+    prompt = dc.build_effective_system_prompt(
+        "Lumi",
+        "Cheerful pet",
+        use_tools=True,
+        memories=["User prefers dark theme", "User is an AI researcher"],
+        enable_long_term_memory=True,
+    )
+    assert "[Persistent Long-Term Memory & User Facts]:" in prompt
+    assert "User prefers dark theme" in prompt
+    assert "User is an AI researcher" in prompt
+    assert "remember_user_fact" in prompt
+
+    disabled_prompt = dc.build_effective_system_prompt(
+        "Lumi",
+        "Cheerful pet",
+        use_tools=True,
+        memories=["User prefers dark theme"],
+        enable_long_term_memory=False,
+    )
+    assert "[Persistent Long-Term Memory & User Facts]:" not in disabled_prompt
+
+
+def test_chat_popup_add_assistant_message():
+    _get_qapp()
+    cfg = dc.CharacterConfig()
+    popup = dc.ChatPopupWindow(cfg)
+    try:
+        popup.add_user_message("Hello Lumi!")
+        popup.add_assistant_message("Hello there! Welcome back.")
+        # Message layout contains stretch + user wrap + assistant browser
+        assert popup._msg_layout.count() >= 2
+    finally:
+        popup.deleteLater()
+
+
+def test_chat_history_persistence_and_restore(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    app = _get_qapp()
+    hist_file = tmp_path / "chat_history.json"
+    monkeypatch.setattr(dc, "_resolve_history_file", lambda: hist_file)
+
+    cfg = dc.CharacterConfig(persist_chat_history=True, max_saved_history_messages=50)
+    companion = dc.DesktopCompanionApp(app, cfg)
+    try:
+        # Populate bot history
+        companion._bot.history.append(dc.chatbot.Message(role="user", content="What is the weather today?"))
+        companion._bot.history.append(dc.chatbot.Message(role="assistant", content="The weather in Chennai is 28°C and partly cloudy."))
+        companion._save_chat_history()
+
+        assert hist_file.is_file()
+        saved_data = json.loads(hist_file.read_text(encoding="utf-8"))
+        assert len(saved_data) == 2
+        assert saved_data[0]["role"] == "user"
+        assert saved_data[0]["content"] == "What is the weather today?"
+        assert saved_data[1]["role"] == "assistant"
+        assert "28°C" in saved_data[1]["content"]
+
+        # Clear memory in companion to simulate clean restart
+        companion._bot.reset_history()
+        companion.popup.clear_messages()
+        assert len(companion._bot.history) == 0
+
+        # Load chat history from disk
+        companion._load_chat_history()
+        assert len(companion._bot.history) == 2
+        assert companion._bot.history[0].content == "What is the weather today?"
+        assert "28°C" in companion._bot.history[1].content
+
+        # Test clear_conversation resets history on disk
+        companion.clear_conversation()
+        assert len(companion._bot.history) == 0
+        cleared_file_data = json.loads(hist_file.read_text(encoding="utf-8"))
+        assert cleared_file_data == []
+    finally:
+        companion.quit_app()
+
+
+def test_settings_dialog_memory_tab(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    _get_qapp()
+    mem_file = tmp_path / "companion_memories.json"
+    import memory_manager
+    monkeypatch.setattr(memory_manager, "get_memories_path", lambda custom_path=None: mem_file)
+
+    cfg = dc.CharacterConfig()
+    dlg = dc.SettingsDialog(cfg)
+    try:
+        assert dlg._tabs.count() == 6
+        assert "Memory" in dlg._tabs.tabText(5)
+
+        # Test adding manual memory
+        dlg._new_memory_edit.setText("User likes chocolate ice cream")
+        dlg._add_manual_memory()
+        assert "User likes chocolate ice cream" in dlg._memories_draft
+        assert dlg._mem_count_label.text() == "Total remembered facts: 1"
+
+        # Test deleting single memory
+        dlg._delete_single_memory("User likes chocolate ice cream")
+        assert len(dlg._memories_draft) == 0
+        assert dlg._mem_count_label.text() == "Total remembered facts: 0"
+    finally:
+        dlg.deleteLater()
+
 
 
 
