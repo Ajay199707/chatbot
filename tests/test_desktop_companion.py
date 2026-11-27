@@ -1027,6 +1027,24 @@ def test_tasks_dialog_and_alert_popup(tmp_path, monkeypatch):
         dlg._on_delete_reminder(rem.id)
         assert len(tm.get_reminders("pending")) == 0
 
+        # Add reminder with natural embedded time in note and blank When input
+        dlg._rem_msg_input.setText("dont forget to update teh work at 5:40 p.m")
+        dlg._rem_time_input.clear()
+        dlg._on_add_reminder()
+        assert len(tm.get_reminders("pending")) == 1
+        rem2 = tm.get_reminders("pending")[0]
+        assert "dont forget to update" in rem2.message
+        dlg._on_delete_reminder(rem2.id)
+
+        # Test quick preset time button
+        dlg._set_reminder_time_preset("in 30m")
+        assert dlg._rem_time_input.text() == "in 30m"
+
+        # Verify bright text color styling on input fields
+        assert "#ffffff" in dlg._new_todo_input.styleSheet()
+        assert "#ffffff" in dlg._rem_msg_input.styleSheet()
+        assert "#ffffff" in dlg._rem_time_input.styleSheet()
+
         # Test AlertNotificationPopup
         done_called = False
         snooze_called = False

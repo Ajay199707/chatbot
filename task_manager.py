@@ -166,6 +166,9 @@ def parse_natural_datetime(
     if not expr:
         return None, "none"
 
+    # Normalize a.m. / p.m. variants (e.g. "p.m.", "p.m", "a.m.", "a.m") to "pm" / "am"
+    expr = re.sub(r"\b([ap])\s*\.?\s*m\.?\b", r"\1m", expr)
+
     # Check for recurring keywords
     recurrence = "none"
     if "everyday" in expr or "every day" in expr or "daily" in expr:
@@ -223,9 +226,9 @@ def parse_natural_datetime(
                     recurrence = "weekly"
                 break
 
-    # 5. Clock time parsing: "7:30 pm", "07:30", "7 pm", "8am", "19:00", "at 4"
+    # 5. Clock time parsing: "7:30 pm", "07:30", "7 pm", "8am", "19:00", "at 4", "5.40 pm"
     time_m = re.search(
-        r"(?:at\s+)?\b(\d{1,2})(?::(\d{2}))?(?::(\d{2}))?\s*(am|pm)?\b",
+        r"(?:at\s+)?\b(\d{1,2})(?:[:.](\d{2}))?(?:[:.](\d{2}))?\s*(am|pm)?\b",
         expr,
     )
     if time_m:
@@ -265,7 +268,8 @@ def parse_natural_datetime(
 def parse_alarm_time(time_str: str) -> Optional[str]:
     """Parse time string into normalized 'HH:MM' (24-hour) format."""
     s = time_str.strip().lower()
-    m = re.search(r"\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b", s)
+    s = re.sub(r"\b([ap])\s*\.?\s*m\.?\b", r"\1m", s)
+    m = re.search(r"\b(\d{1,2})(?:[:.](\d{2}))?\s*(am|pm)?\b", s)
     if not m:
         return None
     hr = int(m.group(1))
@@ -284,6 +288,46 @@ def parse_alarm_time(time_str: str) -> Optional[str]:
     if 0 <= hr <= 23 and 0 <= mn <= 59:
         return f"{hr:02d}:{mn:02d}"
     return None
+
+
+def split_reminder_text_and_time(raw_text: str) -> Tuple[str, str]:
+    """Separate a freeform reminder sentence into a note/message and natural time expression.
+
+    Examples:
+        'dont forget to update teh work at 5:40 p.m' -> ('dont forget to update teh work', 'at 5:40 p.m')
+        'call mom in 20 minutes' -> ('call mom', 'in 20 minutes')
+        'buy milk tomorrow at 9am' -> ('buy milk', 'tomorrow at 9am')
+        'take medicine at 10:30 pm' -> ('take medicine', 'at 10:30 pm')
+        '5:40 pm' -> ('Reminder', '5:40 pm')
+        'Drink water' -> ('Drink water', '')
+    """
+    text = (raw_text or "").strip()
+    if not text:
+        return "", ""
+
+    time_tail_pattern = (
+        r'(?:,\s*)?(?:'
+        r'\b(?:at|in|on|by|every|everyday|every\s+day|daily|weekly|tomorrow|today|'
+        r'mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?)\b'
+        r')\s*(?:at\s+)?'
+        r'(?:'
+        r'\d+(?:\.\d+)?\s*(?:seconds?|secs?|minutes?|mins?|hours?|hrs?|days?|s|m|h|d)\b|'
+        r'\b\d{1,2}(?:[:.]\d{2})?\s*(?:am|pm|a\.m\.?|p\.m\.?)\b|'
+        r'\bat\s+\d{1,2}(?:[:.]\d{2})?\b'
+        r').*$'
+        r'|'
+        r'(?:,\s*)?\b\d{1,2}(?:[:.]\d{2})?\s*(?:am|pm|a\.m\.?|p\.m\.?)\b.*$'
+    )
+
+    m = re.search(time_tail_pattern, text, re.IGNORECASE)
+    if m and m.start() < len(text):
+        time_part = text[m.start():].strip().lstrip(",").strip()
+        msg_part = text[:m.start()].strip().rstrip(",").strip()
+        msg_part = re.sub(r"\s+\b(?:at|on|in|by|for)\b$", "", msg_part, flags=re.IGNORECASE).strip()
+        if not msg_part:
+            msg_part = "Reminder"
+        return msg_part, time_part
+    return text, ""
 
 
 # ============================================================================

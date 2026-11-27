@@ -51,6 +51,43 @@ def test_parse_natural_datetime_clock_time():
     dt, _ = parse_natural_datetime("tomorrow at 9:00 am", reference_dt=base)
     assert dt == datetime(2026, 11, 17, 9, 0, 0)
 
+    # Dot-formatted and p.m. / a.m. variants
+    dt_pm, _ = parse_natural_datetime("at 5:40 p.m", reference_dt=base)
+    assert dt_pm == datetime(2026, 11, 16, 17, 40, 0)
+
+    dt_pm_dot, _ = parse_natural_datetime("5:40 p.m.", reference_dt=base)
+    assert dt_pm_dot == datetime(2026, 11, 16, 17, 40, 0)
+
+    early_ref = datetime(2026, 11, 16, 4, 0, 0)
+    dt_early_pm, _ = parse_natural_datetime("5:40 p.m", reference_dt=early_ref)
+    assert dt_early_pm == datetime(2026, 11, 16, 17, 40, 0)
+
+    dt_am, _ = parse_natural_datetime("5:40 a.m.", reference_dt=base)
+    assert dt_am == datetime(2026, 11, 17, 5, 40, 0)
+
+    dt_dot_time, _ = parse_natural_datetime("5.40 pm", reference_dt=base)
+    assert dt_dot_time == datetime(2026, 11, 16, 17, 40, 0)
+
+
+def test_split_reminder_text_and_time():
+    from task_manager import split_reminder_text_and_time
+
+    msg, time_p = split_reminder_text_and_time("dont forget to update teh work at 5:40 p.m")
+    assert msg == "dont forget to update teh work"
+    assert "5:40" in time_p
+
+    msg2, time_p2 = split_reminder_text_and_time("call mom in 20 minutes")
+    assert msg2 == "call mom"
+    assert time_p2 == "in 20 minutes"
+
+    msg3, time_p3 = split_reminder_text_and_time("Drink water")
+    assert msg3 == "Drink water"
+    assert time_p3 == ""
+
+    msg4, time_p4 = split_reminder_text_and_time("5:40 pm")
+    assert msg4 == "Reminder"
+    assert time_p4 == "5:40 pm"
+
 
 def test_parse_natural_datetime_recurring():
     base = datetime(2026, 11, 16, 10, 0, 0)
