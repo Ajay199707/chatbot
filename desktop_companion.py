@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import concurrent.futures
 import copy
 import ctypes
 import ctypes.wintypes
@@ -169,8 +170,52 @@ def clean_text_for_speech(text: str) -> str:
     return t
 
 
+def detect_first_language(text: str) -> str:
+    """Detect whether Tamil or English appears first in the prose text."""
+    clean = (text or "").strip()
+    if not clean:
+        return "en"
+    m_tamil = re.search(r"[\u0B80-\u0BFF]", clean)
+    m_latin = re.search(r"[A-Za-z]", clean)
+    if m_tamil and not m_latin:
+        return "ta"
+    if m_latin and not m_tamil:
+        return "en"
+    if m_tamil and m_latin:
+        return "ta" if m_tamil.start() < m_latin.start() else "en"
+    return "en"
+
+
+def split_text_into_speech_chunks(text: str, max_chunk_len: int = 180) -> List[str]:
+    """Split text into sentence/clause chunks so speech playback begins within ~1 second."""
+    clean = (text or "").strip()
+    if not clean:
+        return []
+
+    raw_sentences = [
+        s.strip() for s in re.split(r"(?<=[.!?\n।])\s+", clean) if s.strip()
+    ]
+    if not raw_sentences:
+        raw_sentences = [clean]
+
+    chunks: List[str] = []
+    current = ""
+    for sent in raw_sentences:
+        if not current:
+            current = sent
+        elif len(current) + len(sent) + 1 <= max_chunk_len:
+            current += " " + sent
+        else:
+            chunks.append(current)
+            current = sent
+    if current:
+        chunks.append(current)
+
+    return chunks
+
+
 def _speak_sapi_sync(clean_text: str) -> None:
-    """Internal synchronous SAPI fallback."""
+    """Internal synchronous SAPI fallback for legacy briefings."""
     global _CURRENT_VOICE_ENGINE
     if sys.platform != "win32" or not clean_text:
         return
@@ -194,34 +239,40 @@ def _speak_sapi_sync(clean_text: str) -> None:
 
 
 class TextToSpeechManager:
-    """Manages Edge-TTS neural speech synthesis and asynchronous native Windows playback."""
+    """Manages Edge-TTS neural speech synthesis and pipelined low-latency Windows playback."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._is_speaking = False
-        self._stop_event = threading.Event()
-        self._active_file: Optional[str] = None
+        self._session_id = 0
+        self._active_files: List[str] = []
 
     def is_speaking(self) -> bool:
         return self._is_speaking
 
     def stop(self) -> None:
-        """Immediately stop any current speech playback and clean up resources."""
-        self._stop_event.set()
+        """Immediately stop any current speech playback and clean up all resources."""
+        with self._lock:
+            self._session_id += 1
+            self._is_speaking = False
+
         if sys.platform == "win32":
             try:
-                ctypes.windll.winmm.mciSendStringW("stop tts_audio", None, 0, None)
-                ctypes.windll.winmm.mciSendStringW("close tts_audio", None, 0, None)
+                ctypes.windll.winmm.mciSendStringW("stop all", None, 0, None)
+                ctypes.windll.winmm.mciSendStringW("close all", None, 0, None)
             except Exception:
                 pass
-        self._is_speaking = False
-        if self._active_file and os.path.exists(self._active_file):
-            try:
-                os.remove(self._active_file)
-            except Exception:
-                pass
-            self._active_file = None
+
         stop_voice_briefing()
+
+        # Clean up temporary audio files
+        for f in list(self._active_files):
+            if f and os.path.exists(f):
+                try:
+                    os.remove(f)
+                except Exception:
+                    pass
+        self._active_files.clear()
 
     def resolve_voice_and_prosody(
         self,
@@ -246,12 +297,14 @@ class TextToSpeechManager:
         pitch = profile.get("pitch", "+0Hz")
         rate = profile.get("rate", "+0%")
 
-        # Auto-detect Tamil Unicode script in text
-        if re.search(r"[\u0B80-\u0BFF]", text or "") and not clean_override.startswith("ta-"):
-            is_male_persona = clean_cid in ("ben_tennyson", "heatblast", "four_arms", "upgrade", "cannonbolt")
-            voice = "ta-IN-ValluvarNeural" if is_male_persona else "ta-IN-PallaviNeural"
-            pitch = "+0Hz"
-            rate = "+0%"
+        # Find which language appears first in the text
+        if not clean_override.startswith("ta-"):
+            first_lang = detect_first_language(text or "")
+            if first_lang == "ta":
+                is_male_persona = clean_cid in ("ben_tennyson", "heatblast", "four_arms", "upgrade", "cannonbolt")
+                voice = "ta-IN-ValluvarNeural" if is_male_persona else "ta-IN-PallaviNeural"
+                pitch = "+0Hz"
+                rate = "+0%"
 
         return voice, pitch, rate
 
@@ -263,85 +316,105 @@ class TextToSpeechManager:
         on_started: Optional[Any] = None,
         on_finished: Optional[Any] = None,
     ) -> None:
-        """Speak text asynchronously in a background thread."""
+        """Speak text asynchronously, streaming chunks so audio begins playing immediately."""
         self.stop()
         clean = clean_text_for_speech(text)
         if not clean:
             return
 
+        with self._lock:
+            self._session_id += 1
+            my_session = self._session_id
+
         clean_cid = (character_id or "lumi").strip().lower()
         clean_override = (voice_override or "auto").strip()
         voice, pitch, rate = self.resolve_voice_and_prosody(clean, character_id=clean_cid, voice_override=clean_override)
 
-        self._stop_event.clear()
+        chunks = split_text_into_speech_chunks(clean, max_chunk_len=180)
+        if not chunks:
+            return
 
         def _worker():
-            temp_path = os.path.join(tempfile.gettempdir(), f"ai_tts_{uuid.uuid4().hex[:8]}.mp3")
-            self._active_file = temp_path
+            import edge_tts
+            mci = ctypes.windll.winmm.mciSendStringW if sys.platform == "win32" else None
 
-            generated_ok = False
-            try:
-                import edge_tts, asyncio
-                comm = edge_tts.Communicate(clean, voice, pitch=pitch, rate=rate)
-                asyncio.run(comm.save(temp_path))
-                if os.path.isfile(temp_path) and os.path.getsize(temp_path) > 1000:
-                    generated_ok = True
-            except Exception:
-                generated_ok = False
-
-            if self._stop_event.is_set():
-                if os.path.exists(temp_path):
-                    try:
-                        os.remove(temp_path)
-                    except Exception:
-                        pass
-                return
-
-            if generated_ok and sys.platform == "win32":
+            # Helper to synthesize a single chunk quickly to mp3 file
+            def _synth_chunk(chunk_text: str, idx: int) -> Optional[str]:
+                if self._session_id != my_session:
+                    return None
+                out_path = os.path.join(tempfile.gettempdir(), f"ai_tts_{my_session}_{idx}_{uuid.uuid4().hex[:6]}.mp3")
                 try:
-                    mci = ctypes.windll.winmm.mciSendStringW
-                    mci(f'open "{temp_path}" type mpegvideo alias tts_audio', None, 0, None)
-                    mci("play tts_audio", None, 0, None)
-                    self._is_speaking = True
-                    if on_started:
-                        try:
-                            on_started()
-                        except Exception:
-                            pass
-
-                    buf = ctypes.create_unicode_buffer(64)
-                    while not self._stop_event.is_set():
-                        time.sleep(0.12)
-                        mci("status tts_audio mode", buf, 64, None)
-                        if buf.value != "playing":
-                            break
-
-                    mci("stop tts_audio", None, 0, None)
-                    mci("close tts_audio", None, 0, None)
+                    comm = edge_tts.Communicate(chunk_text, voice, pitch=pitch, rate=rate)
+                    comm.save_sync(out_path)
+                    if os.path.isfile(out_path) and os.path.getsize(out_path) > 400:
+                        self._active_files.append(out_path)
+                        return out_path
                 except Exception:
                     pass
-                finally:
-                    self._is_speaking = False
-                    if os.path.exists(temp_path):
-                        try:
-                            os.remove(temp_path)
-                        except Exception:
-                            pass
-                    self._active_file = None
-                    if on_finished:
-                        try:
-                            on_finished()
-                        except Exception:
-                            pass
-            else:
+                return None
+
+            # Synthesize chunk 0 first so speech playback begins in ~1 second
+            first_file = _synth_chunk(chunks[0], 0)
+            if self._session_id != my_session or not first_file:
+                return
+
+            self._is_speaking = True
+            if on_started:
                 try:
-                    if on_started:
+                    on_started()
+                except Exception:
+                    pass
+
+            executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+            future_next: Optional[concurrent.futures.Future] = None
+            if len(chunks) > 1:
+                future_next = executor.submit(_synth_chunk, chunks[1], 1)
+
+            try:
+                for idx, chunk_text in enumerate(chunks):
+                    if self._session_id != my_session:
+                        break
+
+                    current_file = first_file if idx == 0 else (future_next.result() if future_next else None)
+                    if self._session_id != my_session or not current_file:
+                        break
+
+                    # Pre-fetch the next chunk in background while current chunk plays
+                    if idx + 2 < len(chunks):
+                        future_next = executor.submit(_synth_chunk, chunks[idx + 2], idx + 2)
+                    else:
+                        future_next = None
+
+                    # Play current chunk
+                    if mci:
+                        alias = f"tts_{my_session}_{idx}"
                         try:
-                            on_started()
+                            mci(f'open "{current_file}" type mpegvideo alias {alias}', None, 0, None)
+                            mci(f"play {alias}", None, 0, None)
+
+                            buf = ctypes.create_unicode_buffer(64)
+                            while self._session_id == my_session:
+                                time.sleep(0.05)
+                                mci(f"status {alias} mode", buf, 64, None)
+                                if buf.value != "playing":
+                                    break
+
+                            mci(f"stop {alias}", None, 0, None)
+                            mci(f"close {alias}", None, 0, None)
                         except Exception:
                             pass
-                    _speak_sapi_sync(clean)
-                finally:
+                    else:
+                        time.sleep(0.05)
+
+                    # Clean up completed file
+                    if os.path.exists(current_file):
+                        try:
+                            os.remove(current_file)
+                        except Exception:
+                            pass
+            finally:
+                executor.shutdown(wait=False, cancel_futures=True)
+                if self._session_id == my_session:
                     self._is_speaking = False
                     if on_finished:
                         try:

@@ -1534,20 +1534,43 @@ def test_tamil_voice_resolution_and_auto_detection():
     v_eng, _, _ = mgr.resolve_voice_and_prosody("Hello, how are you today?", character_id="lumi")
     assert v_eng == "en-US-AnaNeural"
 
-    # 2. Tamil text auto-detects Tamil script and chooses Pallavi for female/cute avatar Lumi
+    # 2. Text starting in Tamil auto-detects Tamil and chooses Pallavi for female avatar Lumi
     v_tam_fem, _, _ = mgr.resolve_voice_and_prosody("வணக்கம்! நான் Lumi, எப்படி இருக்கீங்க?", character_id="lumi")
     assert v_tam_fem == "ta-IN-PallaviNeural"
 
-    # 3. Tamil text auto-detects Tamil script and chooses Valluvar for male avatar Heatblast / Ben 10
+    # 3. Text starting in Tamil auto-detects Tamil and chooses Valluvar for male avatar Heatblast / Ben 10
     v_tam_male, _, _ = mgr.resolve_voice_and_prosody("வணக்கம் நண்பா! நான் Ben 10.", character_id="ben_tennyson")
     assert v_tam_male == "ta-IN-ValluvarNeural"
 
     v_tam_heatblast, _, _ = mgr.resolve_voice_and_prosody("தீப்பிழம்பு சக்தி தயாராக உள்ளது!", character_id="heatblast")
     assert v_tam_heatblast == "ta-IN-ValluvarNeural"
 
-    # 4. Explicit Tamil voice override is preserved regardless of avatar
+    # 4. Text that starts in English but mentions a Tamil word chooses English voice
+    v_first_eng, _, _ = mgr.resolve_voice_and_prosody("In Tamil, the greeting word is வணக்கம்.", character_id="lumi")
+    assert v_first_eng == "en-US-AnaNeural"
+
+    # 5. Explicit voice override is preserved regardless of avatar or language
     v_override, _, _ = mgr.resolve_voice_and_prosody("Mixed Tanglish text", character_id="lumi", voice_override="ta-IN-ValluvarNeural")
     assert v_override == "ta-IN-ValluvarNeural"
+
+
+def test_detect_first_language_and_speech_chunking():
+    # Test first-language detection logic
+    assert dc.detect_first_language("வணக்கம்! Hello world.") == "ta"
+    assert dc.detect_first_language("Hello world! வணக்கம்.") == "en"
+    assert dc.detect_first_language("1. வணக்கம்") == "ta"
+    assert dc.detect_first_language("1. Hello வணக்கம்") == "en"
+    assert dc.detect_first_language("") == "en"
+
+    # Test speech chunking for low-latency playback
+    text = (
+        "First sentence of the reply. Second sentence with important details! "
+        "Third sentence checking quick playback? Fourth sentence confirming pipelined execution."
+    )
+    chunks = dc.split_text_into_speech_chunks(text, max_chunk_len=75)
+    assert len(chunks) >= 2
+    assert "First sentence" in chunks[0]
+    assert "Fourth sentence" in chunks[-1]
 
 
 def test_cricket_ticker_widget_creation_and_update():
