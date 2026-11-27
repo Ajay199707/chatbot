@@ -284,7 +284,9 @@ DEFAULT_SYSTEM_PROMPT = (
     "You are a helpful, accurate AI assistant. Format responses cleanly in Markdown when useful. "
     "When the user asks about live web information, gold/silver rates in India, current news, "
     "or the current date/time, use the available tools to fetch real-time data before answering "
-    "and cite the sources or results honestly."
+    "and cite the sources or results honestly. "
+    "When the user asks for a detailed story, full details, comprehensive narrative, or in-depth explanation, "
+    "provide rich, complete, and immersive responses with full scenes, dialogue, and depth without cutting short."
 )
 
 
@@ -607,7 +609,7 @@ class ChatbotConfig:
     base_url: Optional[str] = None
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
     temperature: float = 0.7
-    max_tokens: int = 4096
+    max_tokens: int = 8192
     max_history_turns: int = 20
     thinking_level: str = "MEDIUM"
     use_tools: bool = True

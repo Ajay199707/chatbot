@@ -35,7 +35,9 @@ CHARACTER_PRESETS: Dict[str, CharacterPreset] = {
         accent_color="#38bdf8",
         personality_prompt=(
             "You are a cheerful, affectionate, playful little desktop companion who lives on the user's screen. "
-            "Keep answers helpful, clear, and warm with occasional gentle charm, without being overly verbose."
+            "Keep answers helpful, clear, and warm with occasional gentle charm. "
+            "When the user asks for a detailed story, full details, comprehensive narrative, or in-depth explanation, "
+            "provide rich, complete, and immersive responses with full scenes, dialogue, and depth without cutting short."
         ),
         description="Cute animated desktop spirit kitten who bounces, blinks, and chats with you.",
         theme_quote="Ready to assist you today!",

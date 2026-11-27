@@ -298,6 +298,8 @@ def split_reminder_text_and_time(raw_text: str) -> Tuple[str, str]:
         'call mom in 20 minutes' -> ('call mom', 'in 20 minutes')
         'buy milk tomorrow at 9am' -> ('buy milk', 'tomorrow at 9am')
         'take medicine at 10:30 pm' -> ('take medicine', 'at 10:30 pm')
+        'at 5:40 pm update the work' -> ('update the work', 'at 5:40 pm')
+        'in 15m take medicine' -> ('take medicine', 'in 15m')
         '5:40 pm' -> ('Reminder', '5:40 pm')
         'Drink water' -> ('Drink water', '')
     """
@@ -305,28 +307,62 @@ def split_reminder_text_and_time(raw_text: str) -> Tuple[str, str]:
     if not text:
         return "", ""
 
+    # 1. Check if whole string is an isolated time expression (e.g. "5:40 pm", "tomorrow 9am", "in 15m")
+    dt_full, _ = parse_natural_datetime(text)
+    if dt_full:
+        non_time_chars = re.sub(
+            r"[\d\s:.,/\-]|am|pm|a\.m\.?|p\.m\.?|at|in|on|by|tomorrow|today|everyday|every\s+day|daily|weekly|"
+            r"mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?|"
+            r"hours?|hrs?|minutes?|mins?|seconds?|secs?|days?|s|m|h|d",
+            "",
+            text,
+            flags=re.IGNORECASE,
+        ).strip()
+        if not non_time_chars:
+            return "Reminder", text
+
+    # 2. Time at the tail: e.g. "update work at 5:40 pm", "call mom in 20m"
     time_tail_pattern = (
         r'(?:,\s*)?(?:'
         r'\b(?:at|in|on|by|every|everyday|every\s+day|daily|weekly|tomorrow|today|'
         r'mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?)\b'
-        r')\s*(?:at\s+)?'
+        r')\s*'
+        r'(?:at\s+)?'
         r'(?:'
-        r'\d+(?:\.\d+)?\s*(?:seconds?|secs?|minutes?|mins?|hours?|hrs?|days?|s|m|h|d)\b|'
-        r'\b\d{1,2}(?:[:.]\d{2})?\s*(?:am|pm|a\.m\.?|p\.m\.?)\b|'
-        r'\bat\s+\d{1,2}(?:[:.]\d{2})?\b'
+        r'\d{1,2}(?:[:.]\d{2})?(?:[:.]\d{2})?\s*(?:am|pm|a\.m\.?|p\.m\.?)?|'
+        r'\d+(?:\.\d+)?\s*(?:seconds?|secs?|minutes?|mins?|hours?|hrs?|days?|s|m|h|d)\b'
         r').*$'
+        r'|'
+        r'(?:,\s*)?\b\d{1,2}:\d{2}(?:\s*(?:am|pm|a\.m\.?|p\.m\.?))?\b.*$'
         r'|'
         r'(?:,\s*)?\b\d{1,2}(?:[:.]\d{2})?\s*(?:am|pm|a\.m\.?|p\.m\.?)\b.*$'
     )
 
     m = re.search(time_tail_pattern, text, re.IGNORECASE)
-    if m and m.start() < len(text):
+    if m and m.start() > 0:
         time_part = text[m.start():].strip().lstrip(",").strip()
         msg_part = text[:m.start()].strip().rstrip(",").strip()
-        msg_part = re.sub(r"\s+\b(?:at|on|in|by|for)\b$", "", msg_part, flags=re.IGNORECASE).strip()
+        msg_part = re.sub(r"\s+\b(?:at|on|in|by|for|to)\b$", "", msg_part, flags=re.IGNORECASE).strip()
         if not msg_part:
             msg_part = "Reminder"
         return msg_part, time_part
+
+    # 3. Time at the head: e.g. "at 5:40 pm update the work", "in 15m take medicine"
+    time_head_pattern = (
+        r'^(?:at|in|on|by|tomorrow|today)?\s*'
+        r'(?:'
+        r'\d{1,2}(?:[:.]\d{2})?\s*(?:am|pm|a\.m\.?|p\.m\.?)|'
+        r'\d+\s*(?:s|m|h|d|mins?|minutes?|hours?|secs?)\b|'
+        r'\b\d{1,2}:\d{2}\b'
+        r')\s*(?:to\s+)?'
+    )
+    hm = re.search(time_head_pattern, text, re.IGNORECASE)
+    if hm and hm.end() < len(text):
+        time_part = text[:hm.end()].strip().rstrip("to").strip()
+        msg_part = text[hm.end():].strip().lstrip(",").strip()
+        if msg_part:
+            return msg_part, time_part
+
     return text, ""
 
 

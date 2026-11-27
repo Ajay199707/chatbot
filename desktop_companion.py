@@ -575,14 +575,17 @@ STARTUP_SHORTCUT_NAME = "AICharacterCompanion.lnk"
 PERSONA_PRESETS: Dict[str, str] = {
     "Cute Desktop Pet": (
         "You are a cheerful, affectionate, playful little desktop companion who lives on the user's screen. "
-        "Keep answers helpful, clear, and warm with occasional gentle charm, without being overly verbose."
+        "Keep answers helpful, clear, and warm with occasional gentle charm. "
+        "When the user asks for a detailed story, full details, comprehensive narrative, or in-depth explanation, "
+        "provide rich, complete, and immersive responses with full scenes, dialogue, and depth without cutting short."
     ),
     "Tech & Coding Buddy": (
         "You are a sharp, friendly engineering sidekick sitting on the user's desktop. "
-        "Give concise, accurate technical help with clean code snippets and practical tips."
+        "Give accurate, well-structured technical help with clean code snippets and practical tips. "
+        "When the user asks for in-depth architecture or detailed implementation, provide complete and exhaustive details."
     ),
     "Concise Assistant": (
-        "You are a calm, ultra-concise desktop assistant. Answer directly in short, clear Markdown bullet points."
+        "You are a calm, direct desktop assistant. Answer clearly in organized Markdown, adapting to full detail whenever requested."
     ),
     "Productivity Coach": (
         "You are an encouraging, organized focus partner. Help break tasks into clear next steps and keep momentum high."
@@ -972,6 +975,36 @@ def get_dialog_qss(theme: UITheme) -> str:
     )
 
 
+def apply_dialog_dark_palette(widget: QtWidgets.QWidget, base_bg: str = "#1e293b", window_bg: str = "#0f172a") -> None:
+    """Explicitly assign a high-contrast dark palette across all groups to prevent native Windows OS controls from rendering black text on dark backgrounds."""
+    pal = widget.palette()
+    text_color = QtGui.QColor("#ffffff")
+    dim_text = QtGui.QColor("#64748b")
+    placeholder_color = QtGui.QColor("#94a3b8")
+    accent_blue = QtGui.QColor("#2563eb")
+
+    for group in (QtGui.QPalette.ColorGroup.Active, QtGui.QPalette.ColorGroup.Inactive):
+        pal.setColor(group, QtGui.QPalette.ColorRole.Window, QtGui.QColor(window_bg))
+        pal.setColor(group, QtGui.QPalette.ColorRole.WindowText, text_color)
+        pal.setColor(group, QtGui.QPalette.ColorRole.Base, QtGui.QColor(base_bg))
+        pal.setColor(group, QtGui.QPalette.ColorRole.AlternateBase, QtGui.QColor("#111827"))
+        pal.setColor(group, QtGui.QPalette.ColorRole.Text, text_color)
+        pal.setColor(group, QtGui.QPalette.ColorRole.Button, QtGui.QColor(base_bg))
+        pal.setColor(group, QtGui.QPalette.ColorRole.ButtonText, text_color)
+        pal.setColor(group, QtGui.QPalette.ColorRole.PlaceholderText, placeholder_color)
+        pal.setColor(group, QtGui.QPalette.ColorRole.Highlight, accent_blue)
+        pal.setColor(group, QtGui.QPalette.ColorRole.HighlightedText, text_color)
+        pal.setColor(group, QtGui.QPalette.ColorRole.BrightText, text_color)
+
+    pal.setColor(QtGui.QPalette.ColorGroup.Disabled, QtGui.QPalette.ColorRole.WindowText, dim_text)
+    pal.setColor(QtGui.QPalette.ColorGroup.Disabled, QtGui.QPalette.ColorRole.Text, dim_text)
+    pal.setColor(QtGui.QPalette.ColorGroup.Disabled, QtGui.QPalette.ColorRole.ButtonText, dim_text)
+    pal.setColor(QtGui.QPalette.ColorGroup.Disabled, QtGui.QPalette.ColorRole.PlaceholderText, QtGui.QColor("#475569"))
+    pal.setColor(QtGui.QPalette.ColorGroup.Disabled, QtGui.QPalette.ColorRole.Base, QtGui.QColor("#0f172a"))
+
+    widget.setPalette(pal)
+
+
 def get_tasks_dialog_qss(theme: UITheme) -> str:
     """Return TasksDialog stylesheet styled with active theme."""
     return (
@@ -982,6 +1015,7 @@ def get_tasks_dialog_qss(theme: UITheme) -> str:
         "QLineEdit:disabled {{ background-color: #0f172a; color: #64748b; }}"
         "QComboBox {{ background-color: #1e293b; color: #ffffff; border: 1.5px solid #334155; border-radius: 6px; padding: 5px 10px; font-size: 12px; min-height: 22px; }}"
         f"QComboBox:hover {{ border-color: {theme.accent_color}; }}"
+        "QComboBox::drop-down { subcontrol-origin: padding; subcontrol-position: top right; width: 22px; border-left: 1px solid #334155; border-top-right-radius: 6px; border-bottom-right-radius: 6px; background-color: #1e293b; }"
         f"QComboBox QAbstractItemView {{ background-color: #1e293b; color: #ffffff; selection-background-color: {theme.accent_hover}; selection-color: #ffffff; border: 1px solid #475569; border-radius: 6px; padding: 4px; outline: none; }}"
         "QComboBox QAbstractItemView::item {{ color: #ffffff; padding: 6px 12px; min-height: 24px; border-radius: 4px; }}"
         f"QComboBox QAbstractItemView::item:hover {{ background-color: #334155; color: {theme.accent_color}; }}"
@@ -1051,6 +1085,7 @@ class CharacterConfig:
     max_saved_history_messages: int = 50
     enable_long_term_memory: bool = True
     companion_memories: List[str] = field(default_factory=list)
+    max_tokens: int = 8192
 
     @classmethod
     def load(cls, path: Path = CONFIG_FILE) -> "CharacterConfig":
@@ -1334,6 +1369,14 @@ def build_effective_system_prompt(
                 "All-Drive Control is ON across all mounted drives (C:\\, D:\\, K:\\, etc., excluding protected OS "
                 "and .env/.git folders). Call list_drives to discover drives or list_directory with paths like 'K:\\'."
             )
+    parts.append(
+        "CRITICAL INSTRUCTION ON DETAIL & DEPTH: "
+        "Adapt your answer length and detail to the user's explicit request. "
+        "When the user asks for a detailed story, full details, comprehensive explanation, in-depth breakdown, "
+        "long narrative, or complete step-by-step guidance, NEVER summarize, truncate, or cut it short! "
+        "Provide the full, rich, immersive, and exhaustive details, scenes, dialogue, and complete depth requested by the user, "
+        "without any artificial character or length restriction."
+    )
     return " ".join(parts)
 
 
@@ -2076,7 +2119,7 @@ class CharacterWidget(QtWidgets.QWidget):
     def show_speech_bubble(self, text: str, duration_ms: int = 4500) -> None:
         cleaned = " ".join((text or "").split())
         if len(cleaned) > 95:
-            cleaned = cleaned[:92] + "..."
+            cleaned = cleaned[:90] + "... [Click to read full]"
         self._speech_text = cleaned
         self._speech_ticks = max(1, duration_ms // 33)
         self.update()
@@ -6115,14 +6158,7 @@ class TasksDialog(QtWidgets.QDialog):
         self.setStyleSheet(get_tasks_dialog_qss(self._theme))
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_StyledBackground, True)
         self.setAutoFillBackground(True)
-        pal = self.palette()
-        pal.setColor(QtGui.QPalette.ColorRole.Window, QtGui.QColor(self._theme.dialog_bg))
-        pal.setColor(QtGui.QPalette.ColorRole.Base, QtGui.QColor(self._theme.dialog_pane_bg))
-        pal.setColor(QtGui.QPalette.ColorRole.Text, QtGui.QColor("#ffffff"))
-        pal.setColor(QtGui.QPalette.ColorRole.WindowText, QtGui.QColor("#ffffff"))
-        pal.setColor(QtGui.QPalette.ColorRole.ButtonText, QtGui.QColor("#ffffff"))
-        pal.setColor(QtGui.QPalette.ColorRole.PlaceholderText, QtGui.QColor("#94a3b8"))
-        self.setPalette(pal)
+        apply_dialog_dark_palette(self, base_bg=self._theme.dialog_pane_bg, window_bg=self._theme.dialog_bg)
 
         self._on_data_changed = on_data_changed
         self._todo_filter = "pending"
@@ -6162,7 +6198,7 @@ class TasksDialog(QtWidgets.QDialog):
         # Footer
         footer = QtWidgets.QHBoxLayout()
         self._footer_lbl = QtWidgets.QLabel("Changes are saved automatically.")
-        self._footer_lbl.setStyleSheet("font-size: 11px; color: #64748b;")
+        self._footer_lbl.setStyleSheet("font-size: 12px; color: #94a3b8;")
         footer.addWidget(self._footer_lbl)
         footer.addStretch(1)
         close_btn = QtWidgets.QPushButton("Close")
@@ -6178,15 +6214,27 @@ class TasksDialog(QtWidgets.QDialog):
 
         self.refresh_data()
 
+    def _set_footer_status(self, text: str, status_type: str = "info") -> None:
+        """Update dialog footer label with clear color coding."""
+        if not hasattr(self, "_footer_lbl"):
+            return
+        colors = {
+            "success": "#4ade80",
+            "warning": "#facc15",
+            "error": "#f87171",
+            "info": "#94a3b8",
+        }
+        col = colors.get(status_type, "#94a3b8")
+        weight = "bold" if status_type in ("success", "warning", "error") else "500"
+        self._footer_lbl.setText(text)
+        self._footer_lbl.setStyleSheet(f"font-size: 12px; color: {col}; font-weight: {weight};")
+
     def _build_todo_tab(self) -> None:
-        tab = QtWidgets.QFrame()
+        tab = QtWidgets.QFrame(self)
         tab.setObjectName("todoTab")
         tab.setAttribute(QtCore.Qt.WidgetAttribute.WA_StyledBackground, True)
         tab.setAutoFillBackground(True)
-        t_pal = tab.palette()
-        t_pal.setColor(QtGui.QPalette.ColorRole.Window, QtGui.QColor(self._theme.dialog_pane_bg))
-        t_pal.setColor(QtGui.QPalette.ColorRole.Base, QtGui.QColor(self._theme.dialog_pane_bg))
-        tab.setPalette(t_pal)
+        apply_dialog_dark_palette(tab, base_bg=self._theme.dialog_pane_bg, window_bg=self._theme.dialog_pane_bg)
         tab.setStyleSheet(f"QFrame#todoTab {{ background: {self._theme.dialog_pane_bg}; border: none; }}")
         layout = QtWidgets.QVBoxLayout(tab)
         layout.setContentsMargins(12, 12, 12, 12)
@@ -6243,11 +6291,11 @@ class TasksDialog(QtWidgets.QDialog):
         self._todo_scroll.viewport().setAttribute(QtCore.Qt.WidgetAttribute.WA_StyledBackground, True)
         self._todo_scroll.setStyleSheet(f"background: {self._theme.dialog_pane_bg}; border: none;")
         self._todo_scroll.viewport().setStyleSheet(f"background: {self._theme.dialog_pane_bg}; border: none;")
-        self._todo_container = QtWidgets.QFrame()
+        self._todo_container = QtWidgets.QFrame(self)
         self._todo_container.setObjectName("todoContainer")
         self._todo_container.setAttribute(QtCore.Qt.WidgetAttribute.WA_StyledBackground, True)
         self._todo_container.setAutoFillBackground(True)
-        self._todo_container.setPalette(t_pal)
+        apply_dialog_dark_palette(self._todo_container, base_bg=self._theme.dialog_pane_bg, window_bg=self._theme.dialog_pane_bg)
         self._todo_container.setStyleSheet(f"QFrame#todoContainer {{ background: {self._theme.dialog_pane_bg}; border: none; }}")
         self._todo_layout = QtWidgets.QVBoxLayout(self._todo_container)
         self._todo_layout.setContentsMargins(4, 4, 12, 4)
@@ -6267,8 +6315,9 @@ class TasksDialog(QtWidgets.QDialog):
         self._new_todo_input = QtWidgets.QLineEdit()
         self._new_todo_input.setFixedHeight(36)
         self._new_todo_input.setPlaceholderText("+ Add a new task (e.g. Finish client presentation)...")
+        apply_dialog_dark_palette(self._new_todo_input, base_bg="#1e293b")
         self._new_todo_input.setStyleSheet(
-            f"QLineEdit {{ background-color: #1e293b; color: #ffffff; border: 1.5px solid #334155; border-radius: 6px; padding: 6px 10px; font-size: 13px; }} "
+            f"QLineEdit {{ background-color: #1e293b; color: #ffffff; border: 1.5px solid #334155; border-radius: 6px; padding: 6px 10px; font-size: 13px; selection-background-color: #2563eb; selection-color: #ffffff; }} "
             f"QLineEdit:focus {{ border-color: {self._theme.accent_color}; color: #ffffff; background-color: #1e293b; }}"
         )
         self._new_todo_input.returnPressed.connect(self._on_add_todo)
@@ -6277,11 +6326,16 @@ class TasksDialog(QtWidgets.QDialog):
         combo_style = (
             f"QComboBox {{ background-color: #1e293b; color: #ffffff; border: 1.5px solid #334155; border-radius: 6px; padding: 5px 10px; font-size: 12px; }} "
             f"QComboBox:hover {{ border-color: {self._theme.accent_color}; }} "
-            f"QComboBox QAbstractItemView {{ background-color: #1e293b; color: #ffffff; selection-background-color: {self._theme.accent_hover}; selection-color: #ffffff; border: 1px solid #475569; }}"
+            f"QComboBox::drop-down {{ subcontrol-origin: padding; subcontrol-position: top right; width: 22px; border-left: 1px solid #334155; border-top-right-radius: 6px; border-bottom-right-radius: 6px; background-color: #1e293b; }} "
+            f"QComboBox QAbstractItemView {{ background-color: #1e293b; color: #ffffff; selection-background-color: {self._theme.accent_hover}; selection-color: #ffffff; border: 1px solid #475569; border-radius: 6px; padding: 4px; outline: none; }} "
+            f"QComboBox QAbstractItemView::item {{ color: #ffffff; padding: 6px 12px; min-height: 24px; border-radius: 4px; }} "
+            f"QComboBox QAbstractItemView::item:hover {{ background-color: #334155; color: {self._theme.accent_color}; }} "
+            f"QComboBox QAbstractItemView::item:selected {{ background-color: {self._theme.accent_hover}; color: #ffffff; }}"
         )
         self._new_todo_pri = QtWidgets.QComboBox()
         self._new_todo_pri.setFixedHeight(36)
         self._new_todo_pri.setView(QtWidgets.QListView())
+        apply_dialog_dark_palette(self._new_todo_pri, base_bg="#1e293b")
         self._new_todo_pri.setStyleSheet(combo_style)
         self._new_todo_pri.addItem("🟡 Medium (Standard)", "medium")
         self._new_todo_pri.addItem("🔴 High (Urgent)", "high")
@@ -6291,6 +6345,7 @@ class TasksDialog(QtWidgets.QDialog):
         self._new_todo_cat = QtWidgets.QComboBox()
         self._new_todo_cat.setFixedHeight(36)
         self._new_todo_cat.setView(QtWidgets.QListView())
+        apply_dialog_dark_palette(self._new_todo_cat, base_bg="#1e293b")
         self._new_todo_cat.setStyleSheet(combo_style)
         self._new_todo_cat.addItems(["General", "Work", "Personal", "Study", "Shopping"])
         add_layout.addWidget(self._new_todo_cat)
@@ -6310,14 +6365,11 @@ class TasksDialog(QtWidgets.QDialog):
         self._tabs.addTab(tab, "📝 To-Do List")
 
     def _build_alarms_tab(self) -> None:
-        tab = QtWidgets.QFrame()
+        tab = QtWidgets.QFrame(self)
         tab.setObjectName("alarmsTab")
         tab.setAttribute(QtCore.Qt.WidgetAttribute.WA_StyledBackground, True)
         tab.setAutoFillBackground(True)
-        t_pal = tab.palette()
-        t_pal.setColor(QtGui.QPalette.ColorRole.Window, QtGui.QColor(self._theme.dialog_pane_bg))
-        t_pal.setColor(QtGui.QPalette.ColorRole.Base, QtGui.QColor(self._theme.dialog_pane_bg))
-        tab.setPalette(t_pal)
+        apply_dialog_dark_palette(tab, base_bg=self._theme.dialog_pane_bg, window_bg=self._theme.dialog_pane_bg)
         tab.setStyleSheet(f"QFrame#alarmsTab {{ background: {self._theme.dialog_pane_bg}; border: none; }}")
         layout = QtWidgets.QVBoxLayout(tab)
         layout.setContentsMargins(12, 12, 12, 12)
@@ -6350,9 +6402,10 @@ class TasksDialog(QtWidgets.QDialog):
         self._alm_time_input.setPlaceholderText("07:30")
         self._alm_time_input.setToolTip("Type exact time (e.g. 07:30 or 7:00 AM) or slide the controls below")
         self._alm_time_input.setFixedWidth(115)
+        apply_dialog_dark_palette(self._alm_time_input, base_bg="#1e293b")
         self._alm_time_input.setStyleSheet(
             f"QLineEdit {{ background: #1e293b; color: {self._theme.accent_color}; font-size: 16px; font-weight: bold; "
-            f"border: 1.5px solid {self._theme.accent_hover}; border-radius: 6px; padding: 4px 8px; }}"
+            f"border: 1.5px solid {self._theme.accent_hover}; border-radius: 6px; padding: 4px 8px; selection-background-color: #2563eb; selection-color: #ffffff; }}"
             f"QLineEdit:focus {{ border-color: {self._theme.accent_color}; }}"
         )
         self._alm_time_input.textChanged.connect(self._on_alm_time_typed)
@@ -6361,8 +6414,9 @@ class TasksDialog(QtWidgets.QDialog):
         self._alm_label_input = QtWidgets.QLineEdit()
         self._alm_label_input.setFixedHeight(36)
         self._alm_label_input.setPlaceholderText("Alarm label (e.g. Morning Wakeup, Standup)...")
+        apply_dialog_dark_palette(self._alm_label_input, base_bg="#1e293b")
         self._alm_label_input.setStyleSheet(
-            f"QLineEdit {{ background-color: #1e293b; color: #ffffff; border: 1.5px solid #334155; border-radius: 6px; padding: 6px 10px; font-size: 13px; }} "
+            f"QLineEdit {{ background-color: #1e293b; color: #ffffff; border: 1.5px solid #334155; border-radius: 6px; padding: 6px 10px; font-size: 13px; selection-background-color: #2563eb; selection-color: #ffffff; }} "
             f"QLineEdit:focus {{ border-color: {self._theme.accent_color}; color: #ffffff; background-color: #1e293b; }}"
         )
         self._alm_label_input.returnPressed.connect(self._on_add_alarm)
@@ -6371,11 +6425,16 @@ class TasksDialog(QtWidgets.QDialog):
         alm_combo_style = (
             f"QComboBox {{ background-color: #1e293b; color: #ffffff; border: 1.5px solid #334155; border-radius: 6px; padding: 5px 10px; font-size: 12px; }} "
             f"QComboBox:hover {{ border-color: {self._theme.accent_color}; }} "
-            f"QComboBox QAbstractItemView {{ background-color: #1e293b; color: #ffffff; selection-background-color: {self._theme.accent_hover}; selection-color: #ffffff; border: 1px solid #475569; }}"
+            f"QComboBox::drop-down {{ subcontrol-origin: padding; subcontrol-position: top right; width: 22px; border-left: 1px solid #334155; border-top-right-radius: 6px; border-bottom-right-radius: 6px; background-color: #1e293b; }} "
+            f"QComboBox QAbstractItemView {{ background-color: #1e293b; color: #ffffff; selection-background-color: {self._theme.accent_hover}; selection-color: #ffffff; border: 1px solid #475569; border-radius: 6px; padding: 4px; outline: none; }} "
+            f"QComboBox QAbstractItemView::item {{ color: #ffffff; padding: 6px 12px; min-height: 24px; border-radius: 4px; }} "
+            f"QComboBox QAbstractItemView::item:hover {{ background-color: #334155; color: {self._theme.accent_color}; }} "
+            f"QComboBox QAbstractItemView::item:selected {{ background-color: {self._theme.accent_hover}; color: #ffffff; }}"
         )
         self._alm_repeat_combo = QtWidgets.QComboBox()
         self._alm_repeat_combo.setFixedHeight(36)
         self._alm_repeat_combo.setView(QtWidgets.QListView())
+        apply_dialog_dark_palette(self._alm_repeat_combo, base_bg="#1e293b")
         self._alm_repeat_combo.setStyleSheet(alm_combo_style)
         self._alm_repeat_combo.addItem("Everyday", "all")
         self._alm_repeat_combo.addItem("Weekdays (Mon-Fri)", "weekdays")
@@ -6490,11 +6549,11 @@ class TasksDialog(QtWidgets.QDialog):
         self._alarms_scroll.viewport().setAttribute(QtCore.Qt.WidgetAttribute.WA_StyledBackground, True)
         self._alarms_scroll.setStyleSheet(f"background: {self._theme.dialog_pane_bg}; border: none;")
         self._alarms_scroll.viewport().setStyleSheet(f"background: {self._theme.dialog_pane_bg}; border: none;")
-        self._alarms_container = QtWidgets.QFrame()
+        self._alarms_container = QtWidgets.QFrame(self)
         self._alarms_container.setObjectName("alarmsContainer")
         self._alarms_container.setAttribute(QtCore.Qt.WidgetAttribute.WA_StyledBackground, True)
         self._alarms_container.setAutoFillBackground(True)
-        self._alarms_container.setPalette(t_pal)
+        apply_dialog_dark_palette(self._alarms_container, base_bg=self._theme.dialog_pane_bg, window_bg=self._theme.dialog_pane_bg)
         self._alarms_container.setStyleSheet(f"QFrame#alarmsContainer {{ background: {self._theme.dialog_pane_bg}; border: none; }}")
         self._alarms_layout = QtWidgets.QVBoxLayout(self._alarms_container)
         self._alarms_layout.setContentsMargins(4, 4, 12, 4)
@@ -6506,14 +6565,11 @@ class TasksDialog(QtWidgets.QDialog):
         self._tabs.addTab(tab, "⏰ Alarms")
 
     def _build_reminders_tab(self) -> None:
-        tab = QtWidgets.QFrame()
+        tab = QtWidgets.QFrame(self)
         tab.setObjectName("remindersTab")
         tab.setAttribute(QtCore.Qt.WidgetAttribute.WA_StyledBackground, True)
         tab.setAutoFillBackground(True)
-        t_pal = tab.palette()
-        t_pal.setColor(QtGui.QPalette.ColorRole.Window, QtGui.QColor(self._theme.dialog_pane_bg))
-        t_pal.setColor(QtGui.QPalette.ColorRole.Base, QtGui.QColor(self._theme.dialog_pane_bg))
-        tab.setPalette(t_pal)
+        apply_dialog_dark_palette(tab, base_bg=self._theme.dialog_pane_bg, window_bg=self._theme.dialog_pane_bg)
         tab.setStyleSheet(f"QFrame#remindersTab {{ background: {self._theme.dialog_pane_bg}; border: none; }}")
         layout = QtWidgets.QVBoxLayout(tab)
         layout.setContentsMargins(12, 12, 12, 12)
@@ -6541,14 +6597,16 @@ class TasksDialog(QtWidgets.QDialog):
 
         rem_input_style = (
             "QLineEdit { background-color: #1e293b; color: #ffffff; border: 1.5px solid #334155; "
-            "border-radius: 6px; padding: 6px 10px; font-size: 13px; } "
+            "border-radius: 6px; padding: 6px 10px; font-size: 13px; selection-background-color: #2563eb; selection-color: #ffffff; } "
             "QLineEdit:focus { border-color: #a78bfa; color: #ffffff; background-color: #1e293b; }"
         )
 
         self._rem_msg_input = QtWidgets.QLineEdit()
         self._rem_msg_input.setFixedHeight(36)
         self._rem_msg_input.setPlaceholderText("Reminder note (e.g. Drink water, Update work at 5:40 pm)...")
+        apply_dialog_dark_palette(self._rem_msg_input, base_bg="#1e293b")
         self._rem_msg_input.setStyleSheet(rem_input_style)
+        self._rem_msg_input.textChanged.connect(self._on_rem_msg_changed)
         self._rem_msg_input.returnPressed.connect(self._on_rem_msg_return_pressed)
         row1.addWidget(self._rem_msg_input, 1)
 
@@ -6556,6 +6614,7 @@ class TasksDialog(QtWidgets.QDialog):
         self._rem_time_input.setFixedHeight(36)
         self._rem_time_input.setPlaceholderText("When (in 15m, 4:30 pm)...")
         self._rem_time_input.setFixedWidth(165)
+        apply_dialog_dark_palette(self._rem_time_input, base_bg="#1e293b")
         self._rem_time_input.setStyleSheet(rem_input_style)
         self._rem_time_input.returnPressed.connect(self._on_add_reminder)
         row1.addWidget(self._rem_time_input)
@@ -6571,6 +6630,11 @@ class TasksDialog(QtWidgets.QDialog):
         rem_btn.clicked.connect(self._on_add_reminder)
         row1.addWidget(rem_btn)
         rem_add_layout.addLayout(row1)
+
+        # Real-time hint label for detected time
+        self._rem_hint_lbl = QtWidgets.QLabel("")
+        self._rem_hint_lbl.setStyleSheet("font-size: 11px; color: #a78bfa; font-style: italic; padding-left: 2px;")
+        rem_add_layout.addWidget(self._rem_hint_lbl)
 
         # Row 2: Quick Presets row
         presets_row = QtWidgets.QHBoxLayout()
@@ -6608,11 +6672,11 @@ class TasksDialog(QtWidgets.QDialog):
         self._rems_scroll.viewport().setAttribute(QtCore.Qt.WidgetAttribute.WA_StyledBackground, True)
         self._rems_scroll.setStyleSheet(f"background: {self._theme.dialog_pane_bg}; border: none;")
         self._rems_scroll.viewport().setStyleSheet(f"background: {self._theme.dialog_pane_bg}; border: none;")
-        self._rems_container = QtWidgets.QFrame()
+        self._rems_container = QtWidgets.QFrame(self)
         self._rems_container.setObjectName("remindersContainer")
         self._rems_container.setAttribute(QtCore.Qt.WidgetAttribute.WA_StyledBackground, True)
         self._rems_container.setAutoFillBackground(True)
-        self._rems_container.setPalette(t_pal)
+        apply_dialog_dark_palette(self._rems_container, base_bg=self._theme.dialog_pane_bg, window_bg=self._theme.dialog_pane_bg)
         self._rems_container.setStyleSheet(f"QFrame#remindersContainer {{ background: {self._theme.dialog_pane_bg}; border: none; }}")
         self._rems_layout = QtWidgets.QVBoxLayout(self._rems_container)
         self._rems_layout.setContentsMargins(4, 4, 12, 4)
@@ -6682,36 +6746,25 @@ class TasksDialog(QtWidgets.QDialog):
             self._config = config
         self._theme = get_ui_theme(getattr(self._config, "ui_theme", "auto"), character_id=getattr(self._config, "character_id", "lumi"))
         self.setStyleSheet(get_tasks_dialog_qss(self._theme))
-        pal = self.palette()
-        pal.setColor(QtGui.QPalette.ColorRole.Window, QtGui.QColor(self._theme.dialog_bg))
-        pal.setColor(QtGui.QPalette.ColorRole.Base, QtGui.QColor(self._theme.dialog_pane_bg))
-        pal.setColor(QtGui.QPalette.ColorRole.Text, QtGui.QColor("#ffffff"))
-        pal.setColor(QtGui.QPalette.ColorRole.WindowText, QtGui.QColor("#ffffff"))
-        pal.setColor(QtGui.QPalette.ColorRole.ButtonText, QtGui.QColor("#ffffff"))
-        pal.setColor(QtGui.QPalette.ColorRole.PlaceholderText, QtGui.QColor("#94a3b8"))
-        self.setPalette(pal)
-
-        t_pal = QtGui.QPalette()
-        t_pal.setColor(QtGui.QPalette.ColorRole.Window, QtGui.QColor(self._theme.dialog_pane_bg))
-        t_pal.setColor(QtGui.QPalette.ColorRole.Base, QtGui.QColor(self._theme.dialog_pane_bg))
+        apply_dialog_dark_palette(self, base_bg=self._theme.dialog_pane_bg, window_bg=self._theme.dialog_bg)
 
         if hasattr(self, "_todo_scroll") and self._todo_scroll:
             self._todo_scroll.setStyleSheet(f"background: {self._theme.dialog_pane_bg}; border: none;")
             self._todo_scroll.viewport().setStyleSheet(f"background: {self._theme.dialog_pane_bg}; border: none;")
         if hasattr(self, "_todo_container") and self._todo_container:
-            self._todo_container.setPalette(t_pal)
+            apply_dialog_dark_palette(self._todo_container, base_bg=self._theme.dialog_pane_bg, window_bg=self._theme.dialog_pane_bg)
             self._todo_container.setStyleSheet(f"QFrame#todoContainer {{ background: {self._theme.dialog_pane_bg}; border: none; }}")
         if hasattr(self, "_alarms_scroll") and self._alarms_scroll:
             self._alarms_scroll.setStyleSheet(f"background: {self._theme.dialog_pane_bg}; border: none;")
             self._alarms_scroll.viewport().setStyleSheet(f"background: {self._theme.dialog_pane_bg}; border: none;")
         if hasattr(self, "_alarms_container") and self._alarms_container:
-            self._alarms_container.setPalette(t_pal)
+            apply_dialog_dark_palette(self._alarms_container, base_bg=self._theme.dialog_pane_bg, window_bg=self._theme.dialog_pane_bg)
             self._alarms_container.setStyleSheet(f"QFrame#alarmsContainer {{ background: {self._theme.dialog_pane_bg}; border: none; }}")
         if hasattr(self, "_rems_scroll") and self._rems_scroll:
             self._rems_scroll.setStyleSheet(f"background: {self._theme.dialog_pane_bg}; border: none;")
             self._rems_scroll.viewport().setStyleSheet(f"background: {self._theme.dialog_pane_bg}; border: none;")
         if hasattr(self, "_rems_container") and self._rems_container:
-            self._rems_container.setPalette(t_pal)
+            apply_dialog_dark_palette(self._rems_container, base_bg=self._theme.dialog_pane_bg, window_bg=self._theme.dialog_pane_bg)
             self._rems_container.setStyleSheet(f"QFrame#remindersContainer {{ background: {self._theme.dialog_pane_bg}; border: none; }}")
 
         if hasattr(self, "_title_lbl"):
@@ -6728,10 +6781,11 @@ class TasksDialog(QtWidgets.QDialog):
                 f"QPushButton{{background:{self._theme.accent_hover};color:#fff;font-weight:bold;border:none;border-radius:6px;padding:7px 14px;font-size:12px;}}"
                 f"QPushButton:hover{{background:{self._theme.accent_color};}}"
             )
-        if hasattr(self, "_alm_time_input"):
+        if hasattr(self, "_alm_time_input") and self._alm_time_input:
+            apply_dialog_dark_palette(self._alm_time_input, base_bg="#1e293b")
             self._alm_time_input.setStyleSheet(
                 f"QLineEdit {{ background: #1e293b; color: {self._theme.accent_color}; font-size: 16px; font-weight: bold; "
-                f"border: 1.5px solid {self._theme.accent_hover}; border-radius: 6px; padding: 4px 8px; }}"
+                f"border: 1.5px solid {self._theme.accent_hover}; border-radius: 6px; padding: 4px 8px; selection-background-color: #2563eb; selection-color: #ffffff; }}"
                 f"QLineEdit:focus {{ border-color: {self._theme.accent_color}; }}"
             )
         if hasattr(self, "_hour_slider_lbl"):
@@ -6749,33 +6803,41 @@ class TasksDialog(QtWidgets.QDialog):
         if hasattr(self, "_min_slider"):
             self._min_slider.setStyleSheet(slider_style)
         if hasattr(self, "_new_todo_input") and self._new_todo_input:
+            apply_dialog_dark_palette(self._new_todo_input, base_bg="#1e293b")
             self._new_todo_input.setStyleSheet(
-                f"QLineEdit {{ background-color: #1e293b; color: #ffffff; border: 1.5px solid #334155; border-radius: 6px; padding: 6px 10px; font-size: 13px; }} "
+                f"QLineEdit {{ background-color: #1e293b; color: #ffffff; border: 1.5px solid #334155; border-radius: 6px; padding: 6px 10px; font-size: 13px; selection-background-color: #2563eb; selection-color: #ffffff; }} "
                 f"QLineEdit:focus {{ border-color: {self._theme.accent_color}; color: #ffffff; background-color: #1e293b; }}"
             )
         if hasattr(self, "_new_todo_pri") and self._new_todo_pri:
             c_style = (
                 f"QComboBox {{ background-color: #1e293b; color: #ffffff; border: 1.5px solid #334155; border-radius: 6px; padding: 5px 10px; font-size: 12px; }} "
                 f"QComboBox:hover {{ border-color: {self._theme.accent_color}; }} "
+                f"QComboBox::drop-down {{ subcontrol-origin: padding; subcontrol-position: top right; width: 22px; border-left: 1px solid #334155; border-top-right-radius: 6px; border-bottom-right-radius: 6px; background-color: #1e293b; }} "
                 f"QComboBox QAbstractItemView {{ background-color: #1e293b; color: #ffffff; selection-background-color: {self._theme.accent_hover}; selection-color: #ffffff; border: 1px solid #475569; }}"
             )
+            apply_dialog_dark_palette(self._new_todo_pri, base_bg="#1e293b")
             self._new_todo_pri.setStyleSheet(c_style)
             if hasattr(self, "_new_todo_cat") and self._new_todo_cat:
+                apply_dialog_dark_palette(self._new_todo_cat, base_bg="#1e293b")
                 self._new_todo_cat.setStyleSheet(c_style)
             if hasattr(self, "_alm_repeat_combo") and self._alm_repeat_combo:
+                apply_dialog_dark_palette(self._alm_repeat_combo, base_bg="#1e293b")
                 self._alm_repeat_combo.setStyleSheet(c_style)
         if hasattr(self, "_alm_label_input") and self._alm_label_input:
+            apply_dialog_dark_palette(self._alm_label_input, base_bg="#1e293b")
             self._alm_label_input.setStyleSheet(
-                f"QLineEdit {{ background-color: #1e293b; color: #ffffff; border: 1.5px solid #334155; border-radius: 6px; padding: 6px 10px; font-size: 13px; }} "
+                f"QLineEdit {{ background-color: #1e293b; color: #ffffff; border: 1.5px solid #334155; border-radius: 6px; padding: 6px 10px; font-size: 13px; selection-background-color: #2563eb; selection-color: #ffffff; }} "
                 f"QLineEdit:focus {{ border-color: {self._theme.accent_color}; color: #ffffff; background-color: #1e293b; }}"
             )
         if hasattr(self, "_rem_msg_input") and self._rem_msg_input:
             rem_input_style = (
-                f"QLineEdit {{ background-color: #1e293b; color: #ffffff; border: 1.5px solid #334155; border-radius: 6px; padding: 6px 10px; font-size: 13px; }} "
+                f"QLineEdit {{ background-color: #1e293b; color: #ffffff; border: 1.5px solid #334155; border-radius: 6px; padding: 6px 10px; font-size: 13px; selection-background-color: #2563eb; selection-color: #ffffff; }} "
                 f"QLineEdit:focus {{ border-color: #a78bfa; color: #ffffff; background-color: #1e293b; }}"
             )
+            apply_dialog_dark_palette(self._rem_msg_input, base_bg="#1e293b")
             self._rem_msg_input.setStyleSheet(rem_input_style)
             if hasattr(self, "_rem_time_input") and self._rem_time_input:
+                apply_dialog_dark_palette(self._rem_time_input, base_bg="#1e293b")
                 self._rem_time_input.setStyleSheet(rem_input_style)
         self.refresh_data()
 
@@ -6796,7 +6858,7 @@ class TasksDialog(QtWidgets.QDialog):
 
         if not todos:
             empty_lbl = QtWidgets.QLabel(f"No {self._todo_filter} tasks found. Type a task below to add one!")
-            empty_lbl.setStyleSheet("color:#64748b;font-style:italic;padding:16px;text-align:center;")
+            empty_lbl.setStyleSheet("color:#94a3b8;font-size:12.5px;font-style:italic;padding:18px;text-align:center;")
             self._todo_layout.insertWidget(0, empty_lbl)
             return
 
@@ -6874,7 +6936,7 @@ class TasksDialog(QtWidgets.QDialog):
 
         if not alarms:
             empty_lbl = QtWidgets.QLabel("No alarms set. Add one above!")
-            empty_lbl.setStyleSheet("color:#64748b;font-style:italic;padding:8px;")
+            empty_lbl.setStyleSheet("color:#94a3b8;font-size:12.5px;font-style:italic;padding:14px;text-align:center;")
             self._alarms_layout.insertWidget(0, empty_lbl)
             return
 
@@ -6951,7 +7013,7 @@ class TasksDialog(QtWidgets.QDialog):
 
         if not rems:
             empty_lbl = QtWidgets.QLabel("No pending reminders. Set one above!")
-            empty_lbl.setStyleSheet("color:#64748b;font-style:italic;padding:8px;")
+            empty_lbl.setStyleSheet("color:#94a3b8;font-size:12.5px;font-style:italic;padding:14px;text-align:center;")
             self._rems_layout.insertWidget(0, empty_lbl)
             return
 
@@ -7036,7 +7098,7 @@ class TasksDialog(QtWidgets.QDialog):
         task_manager.get_task_manager().add_todo(title, priority=pri, category=cat)
         self._new_todo_input.clear()
         self.refresh_todos()
-        self._footer_lbl.setText(f"Added task '{title}'.")
+        self._set_footer_status(f"Added task '{title}'.", "success")
         if self._on_data_changed:
             self._on_data_changed()
 
@@ -7055,14 +7117,14 @@ class TasksDialog(QtWidgets.QDialog):
     def _on_delete_todo(self, todo_id: str) -> None:
         task_manager.get_task_manager().delete_todo(todo_id)
         self.refresh_todos()
-        self._footer_lbl.setText("Task deleted.")
+        self._set_footer_status("Task deleted.", "info")
         if self._on_data_changed:
             self._on_data_changed()
 
     def _clear_completed_todos(self) -> None:
         task_manager.get_task_manager().clear_completed_todos()
         self.refresh_todos()
-        self._footer_lbl.setText("Cleared completed tasks.")
+        self._set_footer_status("Cleared completed tasks.", "info")
         if self._on_data_changed:
             self._on_data_changed()
 
@@ -7072,7 +7134,7 @@ class TasksDialog(QtWidgets.QDialog):
             return
         t_str = task_manager.parse_alarm_time(raw_time)
         if not t_str:
-            self._footer_lbl.setText("Invalid alarm time format. Use HH:MM or AM/PM (e.g. 07:30).")
+            self._set_footer_status("Invalid alarm time format. Use HH:MM or AM/PM (e.g. 07:30).", "error")
             return
         lbl = self._alm_label_input.text().strip() or "Alarm"
 
@@ -7091,7 +7153,7 @@ class TasksDialog(QtWidgets.QDialog):
         task_manager.get_task_manager().add_alarm(t_str, label=lbl, days=days)
         self._alm_label_input.clear()
         self.refresh_alarms()
-        self._footer_lbl.setText(f"Alarm set for {t_str} ({lbl}).")
+        self._set_footer_status(f"Alarm set for {t_str} ({lbl}).", "success")
         if self._on_data_changed:
             self._on_data_changed()
 
@@ -7104,7 +7166,7 @@ class TasksDialog(QtWidgets.QDialog):
     def _on_delete_alarm(self, alarm_id: str) -> None:
         task_manager.get_task_manager().delete_alarm(alarm_id)
         self.refresh_alarms()
-        self._footer_lbl.setText("Alarm deleted.")
+        self._set_footer_status("Alarm deleted.", "info")
         if self._on_data_changed:
             self._on_data_changed()
 
@@ -7112,7 +7174,7 @@ class TasksDialog(QtWidgets.QDialog):
         self._rem_time_input.setText(val)
         rem_input_style = (
             "QLineEdit { background-color: #1e293b; color: #ffffff; border: 1.5px solid #334155; "
-            "border-radius: 6px; padding: 6px 10px; font-size: 13px; } "
+            "border-radius: 6px; padding: 6px 10px; font-size: 13px; selection-background-color: #2563eb; selection-color: #ffffff; } "
             "QLineEdit:focus { border-color: #a78bfa; color: #ffffff; background-color: #1e293b; }"
         )
         self._rem_time_input.setStyleSheet(rem_input_style)
@@ -7120,6 +7182,22 @@ class TasksDialog(QtWidgets.QDialog):
             self._rem_msg_input.setFocus()
         else:
             self._rem_time_input.setFocus()
+
+    def _on_rem_msg_changed(self, text: str) -> None:
+        t = text.strip()
+        if not t:
+            if hasattr(self, "_rem_hint_lbl"):
+                self._rem_hint_lbl.setText("")
+            return
+        _, split_time = task_manager.split_reminder_text_and_time(t)
+        check_time = split_time or t
+        dt, _ = task_manager.parse_natural_datetime(check_time)
+        if dt and hasattr(self, "_rem_hint_lbl"):
+            t_str = dt.strftime("%I:%M %p").lstrip("0")
+            d_str = "today" if dt.date() == datetime.now().date() else ("tomorrow" if (dt.date() - datetime.now().date()).days == 1 else dt.strftime("%b %d"))
+            self._rem_hint_lbl.setText(f"💡 Detected time: {d_str} at {t_str} (Press Enter or click + Set Reminder)")
+        elif hasattr(self, "_rem_hint_lbl"):
+            self._rem_hint_lbl.setText("")
 
     def _on_rem_msg_return_pressed(self) -> None:
         msg = self._rem_msg_input.text().strip()
@@ -7132,14 +7210,19 @@ class TasksDialog(QtWidgets.QDialog):
             if split_time:
                 self._on_add_reminder()
                 return
+            dt_direct, _ = task_manager.parse_natural_datetime(msg)
+            if dt_direct:
+                self._on_add_reminder()
+                return
         self._rem_time_input.setFocus()
+        self._set_footer_status("⏰ Please type when to remind you (e.g. 'in 15m', '5:40 pm') or click a quick preset.", "warning")
 
     def _on_add_reminder(self) -> None:
         msg = self._rem_msg_input.text().strip()
         t_expr = self._rem_time_input.text().strip()
 
         if not msg and not t_expr:
-            self._footer_lbl.setText("⚠️ Please type a reminder note (e.g. 'Call doctor at 5:00 pm').")
+            self._set_footer_status("⚠️ Please type a reminder note (e.g. 'Call doctor at 5:00 pm').", "warning")
             self._rem_msg_input.setFocus()
             return
 
@@ -7155,32 +7238,45 @@ class TasksDialog(QtWidgets.QDialog):
                     t_expr = msg
                     msg = "Reminder"
                 else:
-                    self._footer_lbl.setText("⚠️ Please specify when to remind you in the 'When' field (or click a quick preset).")
+                    self._set_footer_status("⚠️ Please specify when to remind you in 'When' (or click a quick preset like +15m).", "warning")
                     self._rem_time_input.setFocus()
                     self._rem_time_input.setStyleSheet(
                         "QLineEdit { background-color: #1e293b; color: #ffffff; border: 2px solid #f59e0b; "
-                        "border-radius: 6px; padding: 6px 10px; font-size: 13px; }"
+                        "border-radius: 6px; padding: 6px 10px; font-size: 13px; selection-background-color: #2563eb; selection-color: #ffffff; }"
                     )
                     return
         elif not msg and t_expr:
-            msg = "Reminder"
+            # User might have typed the full reminder inside the When box
+            split_msg, split_time = task_manager.split_reminder_text_and_time(t_expr)
+            if split_time and split_msg and split_msg != "Reminder":
+                msg = split_msg
+                t_expr = split_time
+            else:
+                msg = "Reminder"
+        elif msg and t_expr:
+            # If note itself still has the time appended, strip it out cleanly
+            split_msg, split_time = task_manager.split_reminder_text_and_time(msg)
+            if split_time and split_msg:
+                msg = split_msg
 
         dt, rec = task_manager.parse_natural_datetime(t_expr)
         if not dt:
-            self._footer_lbl.setText(f"⚠️ Unrecognized time '{t_expr}'. Try 'in 15m', '5:40 pm', or 'tomorrow 9am'.")
+            self._set_footer_status(f"⚠️ Unrecognized time '{t_expr}'. Try 'in 15m', '5:40 pm', or 'tomorrow 9am'.", "error")
             self._rem_time_input.setFocus()
             self._rem_time_input.setStyleSheet(
                 "QLineEdit { background-color: #1e293b; color: #ffffff; border: 2px solid #ef4444; "
-                "border-radius: 6px; padding: 6px 10px; font-size: 13px; }"
+                "border-radius: 6px; padding: 6px 10px; font-size: 13px; selection-background-color: #2563eb; selection-color: #ffffff; }"
             )
             return
 
         task_manager.get_task_manager().add_reminder(msg, due_time=dt, recurrence=rec)
         self._rem_msg_input.clear()
         self._rem_time_input.clear()
+        if hasattr(self, "_rem_hint_lbl"):
+            self._rem_hint_lbl.setText("")
         rem_input_style = (
             "QLineEdit { background-color: #1e293b; color: #ffffff; border: 1.5px solid #334155; "
-            "border-radius: 6px; padding: 6px 10px; font-size: 13px; } "
+            "border-radius: 6px; padding: 6px 10px; font-size: 13px; selection-background-color: #2563eb; selection-color: #ffffff; } "
             "QLineEdit:focus { border-color: #a78bfa; color: #ffffff; background-color: #1e293b; }"
         )
         self._rem_time_input.setStyleSheet(rem_input_style)
@@ -7188,28 +7284,28 @@ class TasksDialog(QtWidgets.QDialog):
         time_display = dt.strftime("%I:%M %p").lstrip("0")
         day_display = "today" if dt.date() == datetime.now().date() else ("tomorrow" if (dt.date() - datetime.now().date()).days == 1 else dt.strftime("%b %d"))
         rec_info = f" ({rec})" if rec != "none" else ""
-        self._footer_lbl.setText(f"✅ Reminder set for {day_display} at {time_display}{rec_info}: '{msg}'")
+        self._set_footer_status(f"✅ Reminder scheduled for {day_display} at {time_display}{rec_info}: '{msg}'", "success")
         if self._on_data_changed:
             self._on_data_changed()
 
     def _on_snooze_reminder(self, reminder_id: str) -> None:
         task_manager.get_task_manager().snooze_reminder(reminder_id, minutes=5)
         self.refresh_reminders()
-        self._footer_lbl.setText("Reminder snoozed 5m.")
+        self._set_footer_status("Reminder snoozed 5m.", "info")
         if self._on_data_changed:
             self._on_data_changed()
 
     def _on_dismiss_reminder(self, reminder_id: str) -> None:
         task_manager.get_task_manager().dismiss_reminder(reminder_id)
         self.refresh_reminders()
-        self._footer_lbl.setText("Reminder completed.")
+        self._set_footer_status("Reminder completed.", "success")
         if self._on_data_changed:
             self._on_data_changed()
 
     def _on_delete_reminder(self, reminder_id: str) -> None:
         task_manager.get_task_manager().delete_reminder(reminder_id)
         self.refresh_reminders()
-        self._footer_lbl.setText("Reminder deleted.")
+        self._set_footer_status("Reminder deleted.", "info")
         if self._on_data_changed:
             self._on_data_changed()
 
@@ -7225,14 +7321,11 @@ class TasksDialog(QtWidgets.QDialog):
     # ------------------------------------------------------------------------
 
     def _build_pomodoro_tab(self) -> None:
-        tab = QtWidgets.QFrame()
+        tab = QtWidgets.QFrame(self)
         tab.setObjectName("pomodoroTab")
         tab.setAttribute(QtCore.Qt.WidgetAttribute.WA_StyledBackground, True)
         tab.setAutoFillBackground(True)
-        t_pal = tab.palette()
-        t_pal.setColor(QtGui.QPalette.ColorRole.Window, QtGui.QColor(self._theme.dialog_pane_bg))
-        t_pal.setColor(QtGui.QPalette.ColorRole.Base, QtGui.QColor(self._theme.dialog_pane_bg))
-        tab.setPalette(t_pal)
+        apply_dialog_dark_palette(tab, base_bg=self._theme.dialog_pane_bg, window_bg=self._theme.dialog_pane_bg)
         tab.setStyleSheet(f"QFrame#pomodoroTab {{ background: {self._theme.dialog_pane_bg}; border: none; }}")
         layout = QtWidgets.QVBoxLayout(tab)
         layout.setContentsMargins(18, 16, 18, 16)
@@ -7454,6 +7547,7 @@ class DesktopCompanionApp(QtCore.QObject):
                 model_name=config.model_name,
                 thinking_level=config.thinking_level,
                 temperature=config.temperature,
+                max_tokens=int(getattr(config, "max_tokens", 8192)),
                 use_tools=config.use_tools,
                 enable_system_tools=bool(config.enable_system_tools),
                 system_policy=self._build_system_policy(config),
@@ -8383,6 +8477,13 @@ class DesktopCompanionApp(QtCore.QObject):
             "speak your answer", "read your answer",
         ]
         self._prompt_requested_narration = any(trigger in low for trigger in narration_triggers)
+
+        story_triggers = [
+            "story", "full detail", "detailed", "full story", "write a story",
+            "in-depth", "comprehensive", "deep dive", "exhaustive", "full explanation",
+        ]
+        if any(trigger in low for trigger in story_triggers) and not self.popup.isVisible():
+            self.popup.show_active()
 
         display_text = prompt
         if images and not prompt:
