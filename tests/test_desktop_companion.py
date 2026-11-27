@@ -1549,9 +1549,24 @@ def test_tamil_voice_resolution_and_auto_detection():
     v_first_eng, _, _ = mgr.resolve_voice_and_prosody("In Tamil, the greeting word is வணக்கம்.", character_id="lumi")
     assert v_first_eng == "en-US-AnaNeural"
 
-    # 5. Explicit voice override is preserved regardless of avatar or language
-    v_override, _, _ = mgr.resolve_voice_and_prosody("Mixed Tanglish text", character_id="lumi", voice_override="ta-IN-ValluvarNeural")
+    # 5. Tanglish text auto-detects Romanized Tamil and uses Indian English neural voice
+    v_tanglish_fem, _, _ = mgr.resolve_voice_and_prosody("Vanakkam nanba, eppadi irukinga?", character_id="lumi")
+    assert v_tanglish_fem == "en-IN-NeerjaExpressiveNeural"
+
+    v_tanglish_male, _, _ = mgr.resolve_voice_and_prosody("Vanakkam nanba, innaiku weather nalla irukku.", character_id="ben_tennyson")
+    assert v_tanglish_male == "en-IN-PrabhatNeural"
+
+    # 6. Explicit voice override is preserved regardless of avatar or language
+    v_override, _, _ = mgr.resolve_voice_and_prosody("Mixed text", character_id="lumi", voice_override="ta-IN-ValluvarNeural")
     assert v_override == "ta-IN-ValluvarNeural"
+
+
+def test_tanglish_detection():
+    assert dc.is_tanglish_text("Vanakkam nanba, eppadi irukinga?") is True
+    assert dc.is_tanglish_text("Innaiku weather romba nalla irukku.") is True
+    assert dc.is_tanglish_text("Romba thanks!") is True
+    assert dc.is_tanglish_text("Hello, how is the weather today?") is False
+    assert dc.is_tanglish_text("This is standard English prose.") is False
 
 
 def test_detect_first_language_and_speech_chunking():

@@ -123,6 +123,12 @@ CHARACTER_VOICE_PROFILES: Dict[str, Dict[str, str]] = {
         "rate": "+0%",
         "label": "Valluvar (Tamil Natural - Male)",
     },
+    "indian_male": {
+        "voice": "en-IN-PrabhatNeural",
+        "pitch": "+0Hz",
+        "rate": "+0%",
+        "label": "Prabhat (Indian English Male)",
+    },
 }
 
 DEFAULT_VOICE_PROFILE: Dict[str, str] = {
@@ -143,6 +149,7 @@ AVAILABLE_VOICE_OPTIONS: List[Tuple[str, str]] = [
     ("en-US-AvaNeural", "Ava (Expressive US Female)"),
     ("en-US-BrianNeural", "Brian (Warm UK Male)"),
     ("en-IN-NeerjaExpressiveNeural", "Neerja (Expressive Indian English)"),
+    ("en-IN-PrabhatNeural", "Prabhat (Indian English Male)"),
 ]
 
 
@@ -184,6 +191,26 @@ def detect_first_language(text: str) -> str:
     if m_tamil and m_latin:
         return "ta" if m_tamil.start() < m_latin.start() else "en"
     return "en"
+
+
+TANGLISH_INDICATORS = {
+    "vanakkam", "vanakam", "nanba", "nanbar", "thala", "machan", "machi", "thalaiva",
+    "eppadi", "epdi", "irukinga", "irukenga", "irukku", "iruku", "iruken", "irukan",
+    "sollu", "solunga", "solranga", "vanga", "vaanga", "ponga", "poitu",
+    "panren", "pannu", "pannunga", "panreenga", "romba", "konjam", "nalla",
+    "aachu", "aayidichu", "aayitu", "illa", "illai", "illana", "illaya",
+    "innaiku", "inniku", "naalaiku", "ippo", "appo", "eppo", "engae", "enge",
+    "enna", "ethu", "ethuku", "edhuku", "yaaru", "kudunga", "paaru", "parkalam",
+    "theriyum", "theriyathu", "pudikkum", "pudikkathu", "venum", "vendaam",
+    "ungalukku", "enakku", "namakku", "unaku", "ungaloda", "solren", "mudiyum", "mudiyathu",
+}
+
+
+def is_tanglish_text(text: str) -> bool:
+    """Detect if Latin/Romanized text represents Tamil (Tanglish)."""
+    words = set(re.findall(r"[A-Za-z]+", (text or "").lower()))
+    matches = words.intersection(TANGLISH_INDICATORS)
+    return len(matches) >= 2 or (len(words) <= 6 and len(matches) >= 1)
 
 
 def split_text_into_speech_chunks(text: str, max_chunk_len: int = 180) -> List[str]:
@@ -298,11 +325,17 @@ class TextToSpeechManager:
         rate = profile.get("rate", "+0%")
 
         # Find which language appears first in the text
-        if not clean_override.startswith("ta-"):
+        if not clean_override.startswith("ta-") and not clean_override.startswith("en-IN-"):
             first_lang = detect_first_language(text or "")
             if first_lang == "ta":
                 is_male_persona = clean_cid in ("ben_tennyson", "heatblast", "four_arms", "upgrade", "cannonbolt")
                 voice = "ta-IN-ValluvarNeural" if is_male_persona else "ta-IN-PallaviNeural"
+                pitch = "+0Hz"
+                rate = "+0%"
+            elif is_tanglish_text(text or ""):
+                # Use Indian English neural voices which naturally pronounce Romanized Indian/Tamil phonetics
+                is_male_persona = clean_cid in ("ben_tennyson", "heatblast", "four_arms", "upgrade", "cannonbolt")
+                voice = "en-IN-PrabhatNeural" if is_male_persona else "en-IN-NeerjaExpressiveNeural"
                 pitch = "+0Hz"
                 rate = "+0%"
 
