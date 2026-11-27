@@ -1511,11 +1511,43 @@ def test_character_voice_profiles():
     assert "ben_tennyson" in dc.CHARACTER_VOICE_PROFILES
     assert "heatblast" in dc.CHARACTER_VOICE_PROFILES
     assert "gwen_classic" in dc.CHARACTER_VOICE_PROFILES
+    assert "tamil_female" in dc.CHARACTER_VOICE_PROFILES
+    assert "tamil_male" in dc.CHARACTER_VOICE_PROFILES
 
     assert dc.CHARACTER_VOICE_PROFILES["lumi"]["voice"] == "en-US-AnaNeural"
     assert dc.CHARACTER_VOICE_PROFILES["ben_tennyson"]["voice"] == "en-US-GuyNeural"
     assert dc.CHARACTER_VOICE_PROFILES["heatblast"]["voice"] == "en-US-EricNeural"
     assert dc.CHARACTER_VOICE_PROFILES["gwen_classic"]["voice"] == "en-US-JennyNeural"
+    assert dc.CHARACTER_VOICE_PROFILES["tamil_female"]["voice"] == "ta-IN-PallaviNeural"
+    assert dc.CHARACTER_VOICE_PROFILES["tamil_male"]["voice"] == "ta-IN-ValluvarNeural"
+
+    # Verify voice options include Tamil Neural choices
+    voice_ids = [vid for vid, _ in dc.AVAILABLE_VOICE_OPTIONS]
+    assert "ta-IN-PallaviNeural" in voice_ids
+    assert "ta-IN-ValluvarNeural" in voice_ids
+
+
+def test_tamil_voice_resolution_and_auto_detection():
+    mgr = dc.TextToSpeechManager()
+
+    # 1. English text uses avatar's native voice
+    v_eng, _, _ = mgr.resolve_voice_and_prosody("Hello, how are you today?", character_id="lumi")
+    assert v_eng == "en-US-AnaNeural"
+
+    # 2. Tamil text auto-detects Tamil script and chooses Pallavi for female/cute avatar Lumi
+    v_tam_fem, _, _ = mgr.resolve_voice_and_prosody("வணக்கம்! நான் Lumi, எப்படி இருக்கீங்க?", character_id="lumi")
+    assert v_tam_fem == "ta-IN-PallaviNeural"
+
+    # 3. Tamil text auto-detects Tamil script and chooses Valluvar for male avatar Heatblast / Ben 10
+    v_tam_male, _, _ = mgr.resolve_voice_and_prosody("வணக்கம் நண்பா! நான் Ben 10.", character_id="ben_tennyson")
+    assert v_tam_male == "ta-IN-ValluvarNeural"
+
+    v_tam_heatblast, _, _ = mgr.resolve_voice_and_prosody("தீப்பிழம்பு சக்தி தயாராக உள்ளது!", character_id="heatblast")
+    assert v_tam_heatblast == "ta-IN-ValluvarNeural"
+
+    # 4. Explicit Tamil voice override is preserved regardless of avatar
+    v_override, _, _ = mgr.resolve_voice_and_prosody("Mixed Tanglish text", character_id="lumi", voice_override="ta-IN-ValluvarNeural")
+    assert v_override == "ta-IN-ValluvarNeural"
 
 
 def test_cricket_ticker_widget_creation_and_update():

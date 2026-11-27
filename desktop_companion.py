@@ -110,6 +110,18 @@ CHARACTER_VOICE_PROFILES: Dict[str, Dict[str, str]] = {
         "rate": "+1%",
         "label": "Gwen (Smart & Confident - Jenny)",
     },
+    "tamil_female": {
+        "voice": "ta-IN-PallaviNeural",
+        "pitch": "+0Hz",
+        "rate": "+0%",
+        "label": "Pallavi (Tamil Natural - Female)",
+    },
+    "tamil_male": {
+        "voice": "ta-IN-ValluvarNeural",
+        "pitch": "+0Hz",
+        "rate": "+0%",
+        "label": "Valluvar (Tamil Natural - Male)",
+    },
 }
 
 DEFAULT_VOICE_PROFILE: Dict[str, str] = {
@@ -125,6 +137,8 @@ AVAILABLE_VOICE_OPTIONS: List[Tuple[str, str]] = [
     ("ben_tennyson", "Ben 10 (Heroic Boy - Guy)"),
     ("heatblast", "Heatblast (Deep & Fiery - Eric)"),
     ("gwen_classic", "Gwen (Smart & Confident - Jenny)"),
+    ("ta-IN-PallaviNeural", "Pallavi (Tamil Natural - Female)"),
+    ("ta-IN-ValluvarNeural", "Valluvar (Tamil Natural - Male)"),
     ("en-US-AvaNeural", "Ava (Expressive US Female)"),
     ("en-US-BrianNeural", "Brian (Warm UK Male)"),
     ("en-IN-NeerjaExpressiveNeural", "Neerja (Expressive Indian English)"),
@@ -209,6 +223,38 @@ class TextToSpeechManager:
             self._active_file = None
         stop_voice_briefing()
 
+    def resolve_voice_and_prosody(
+        self,
+        text: str,
+        character_id: str = "lumi",
+        voice_override: str = "auto",
+    ) -> Tuple[str, str, str]:
+        """Resolve voice name, pitch, and rate based on text language and character persona."""
+        clean_cid = (character_id or "lumi").strip().lower()
+        clean_override = (voice_override or "auto").strip()
+
+        if clean_override != "auto" and clean_override in CHARACTER_VOICE_PROFILES:
+            profile = CHARACTER_VOICE_PROFILES[clean_override]
+        elif clean_override != "auto" and "-" in clean_override:
+            profile = {"voice": clean_override, "pitch": "+0Hz", "rate": "+0%"}
+        elif clean_cid in CHARACTER_VOICE_PROFILES:
+            profile = CHARACTER_VOICE_PROFILES[clean_cid]
+        else:
+            profile = DEFAULT_VOICE_PROFILE
+
+        voice = profile.get("voice", "en-US-AnaNeural")
+        pitch = profile.get("pitch", "+0Hz")
+        rate = profile.get("rate", "+0%")
+
+        # Auto-detect Tamil Unicode script in text
+        if re.search(r"[\u0B80-\u0BFF]", text or "") and not clean_override.startswith("ta-"):
+            is_male_persona = clean_cid in ("ben_tennyson", "heatblast", "four_arms", "upgrade", "cannonbolt")
+            voice = "ta-IN-ValluvarNeural" if is_male_persona else "ta-IN-PallaviNeural"
+            pitch = "+0Hz"
+            rate = "+0%"
+
+        return voice, pitch, rate
+
     def speak(
         self,
         text: str,
@@ -225,19 +271,7 @@ class TextToSpeechManager:
 
         clean_cid = (character_id or "lumi").strip().lower()
         clean_override = (voice_override or "auto").strip()
-
-        if clean_override != "auto" and clean_override in CHARACTER_VOICE_PROFILES:
-            profile = CHARACTER_VOICE_PROFILES[clean_override]
-        elif clean_override != "auto" and "-" in clean_override:
-            profile = {"voice": clean_override, "pitch": "+0Hz", "rate": "+0%"}
-        elif clean_cid in CHARACTER_VOICE_PROFILES:
-            profile = CHARACTER_VOICE_PROFILES[clean_cid]
-        else:
-            profile = DEFAULT_VOICE_PROFILE
-
-        voice = profile.get("voice", "en-US-AnaNeural")
-        pitch = profile.get("pitch", "+0Hz")
-        rate = profile.get("rate", "+0%")
+        voice, pitch, rate = self.resolve_voice_and_prosody(clean, character_id=clean_cid, voice_override=clean_override)
 
         self._stop_event.clear()
 
